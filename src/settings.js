@@ -1,0 +1,83 @@
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const DEFAULTS = {
+  provider: 'openai',
+  model: '',
+  baseUrl: '',
+  apiKey: '',
+  style: 'modern',
+  diacritics: true,
+  showEnglish: true,
+  showTranslit: true,
+  showCommentaries: true,
+  // Set once the first-run wizard is finished or skipped, so it never nags.
+  setupComplete: false,
+  fontSize: 20,
+  category: '',
+};
+
+/** Persisted app settings. The API key is encrypted by the caller when available. */
+class Settings {
+  constructor(file, { encrypt, decrypt, env = process.env } = {}) {
+    this.file = file;
+    this.encrypt = encrypt;
+    this.decrypt = decrypt;
+    this.env = env;
+    this.data = { ...DEFAULTS };
+    this.load();
+  }
+
+  load() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+      const secret = raw.apiKey;
+      const data = { ...DEFAULTS, ...raw };
+      data.apiKey = this.decrypt && secret ? this.decrypt(secret) : (secret || '');
+      this.data = data;
+    } catch { /* first run */ }
+
+    // Environment overrides make headless testing and CI possible.
+    if (this.env.SEFARIA_LENS_API_KEY) this.data.apiKey = this.env.SEFARIA_LENS_API_KEY;
+    if (this.env.SEFARIA_LENS_BASE_URL) this.data.baseUrl = this.env.SEFARIA_LENS_BASE_URL;
+    if (this.env.SEFARIA_LENS_MODEL) this.data.model = this.env.SEFARIA_LENS_MODEL;
+    if (this.env.SEFARIA_LENS_PROVIDER) this.data.provider = this.env.SEFARIA_LENS_PROVIDER;
+  }
+
+  get() {
+    return { ...this.data };
+  }
+
+  /** Settings safe to send to the renderer: the key is never echoed back. */
+  public() {
+    const { apiKey, ...rest } = this.data;
+    return { ...rest, hasKey: Boolean(apiKey) };
+  }
+
+  set(patch) {
+    const next = { ...this.data };
+    for (const [k, v] of Object.entries(patch || {})) {
+      if (!(k in DEFAULTS)) continue;
+      next[k] = v;
+    }
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'apiKey') && patch.apiKey === '') {
+      next.apiKey = '';
+    }
+    this.data = next;
+    this.save();
+    return this.public();
+  }
+
+  save() {
+    const out = { ...this.data };
+    if (this.encrypt && out.apiKey) out.apiKey = this.encrypt(out.apiKey);
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      fs.writeFileSync(this.file, JSON.stringify(out, null, 2), { mode: 0o600 });
+    } catch { /* non-fatal */ }
+  }
+}
+
+module.exports = { Settings, DEFAULTS };

@@ -1,0 +1,52 @@
+{
+  "name": "sefaria-lens",
+  "productName": "Sefaria Lens",
+  "version": "1.0.0",
+  "description": "Sefaria reader with sourced Q&A, tri-tradition transliteration, and word-by-word study tools",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "node tools/devserver.js",
+    "test": "node --test test/*.test.js",
+    "icon": "node tools/make-icon.js",
+    "dist": "electron-builder --win portable --x64"
+  },
+  "author": "Sefaria Lens contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "org.sefaria.lens",
+    "productName": "Sefaria Lens",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "SefariaLens-${version}-portable.exe",
+      "requestExecutionLevel": "user"
+    }
+  }
+}

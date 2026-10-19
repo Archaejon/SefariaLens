@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'">
+  <title>Sefaria Lens</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="no-context">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">א</div>
+        <div class="brand-text">
+          <strong>Sefaria Lens</strong>
+          <span>sourced study</span>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-btn is-active" data-view="ask">
+          <span class="nav-glyph">?</span> Ask
+        </button>
+        <button class="nav-btn" data-view="reader">
+          <span class="nav-glyph">☰</span> Reader
+        </button>
+        <button class="nav-btn" data-view="library">
+          <span class="nav-glyph">▤</span> Library
+        </button>
+        <button class="nav-btn" data-view="settings">
+          <span class="nav-glyph">⚙</span> Settings
+        </button>
+      </nav>
+
+      <div class="side-section">
+        <h2>Recently opened</h2>
+        <div id="recents" class="recents"><p class="muted small">Nothing yet.</p></div>
+      </div>
+
+      <div class="sidebar-foot">
+        <button id="theme-toggle" class="ghost small">Light mode</button>
+        <p class="muted tiny">Texts and translations © Sefaria and contributors. Each version carries its own license, shown with the source.</p>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- ASK ------------------------------------------------------------ -->
+      <section id="view-ask" class="view">
+        <header class="page-head">
+          <h1>Ask the library</h1>
+          <p class="sub">Answers built from Sefaria texts — every claim comes with the passage and the reason it was chosen.</p>
+        </header>
+
+        <form id="ask-form" class="askbar">
+          <input id="ask-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="How do the sources understand “love your neighbor as yourself”?">
+          <button type="submit" class="primary" id="ask-btn">Ask</button>
+        </form>
+
+        <div class="chips" id="category-chips"></div>
+        <div id="ask-output" class="ask-output"></div>
+      </section>
+
+      <!-- READER --------------------------------------------------------- -->
+      <section id="view-reader" class="view hidden">
+        <div class="reader-bar">
+          <button id="reader-prev" class="icon-btn" title="Previous section">←</button>
+          <div class="ref-field">
+            <input id="reader-ref" type="text" autocomplete="off" spellcheck="false" placeholder="Genesis 1:1, Berakhot 2a, Mishnah Avot 1">
+            <button id="reader-go" class="primary small">Open</button>
+          </div>
+          <button id="reader-next" class="icon-btn" title="Next section">→</button>
+          <button id="reader-external" class="ghost small" title="Open on sefaria.org">Sefaria ↗</button>
+        </div>
+
+        <div class="reader-controls">
+          <div class="seg" id="style-seg" role="group" aria-label="Transliteration style">
+            <button data-style="ashkenazi">Ashkenazi</button>
+            <button data-style="mizrahi">Mizrahi</button>
+            <button data-style="modern" class="is-active">Modern</button>
+          </div>
+          <label class="switch"><input type="checkbox" id="tgl-translit" checked><span>Translit</span></label>
+          <label class="switch"><input type="checkbox" id="tgl-english" checked><span>Translation</span></label>
+          <label class="switch"><input type="checkbox" id="tgl-commentaries" checked><span>Commentaries</span></label>
+          <label class="version-wrap hidden" id="version-wrap">
+            <span class="version-label">Translation</span>
+            <select id="reader-version"></select>
+          </label>
+          <div class="fontctl">
+            <button id="font-down" class="icon-btn" title="Smaller text">A−</button>
+            <button id="font-up" class="icon-btn" title="Larger text">A+</button>
+          </div>
+          <span class="hint" id="reader-hint">Click any word for its dictionary entry and all three transliterations.</span>
+        </div>
+
+        <div id="reader-meta" class="reader-meta"></div>
+        <div id="reader-commentaries" class="reader-commentaries hidden"></div>
+        <div id="reader-text" class="reader-text"></div>
+        <div id="reader-foot" class="reader-foot"></div>
+      </section>
+
+      <!-- LIBRARY -------------------------------------------------------- -->
+      <section id="view-library" class="view hidden">
+        <header class="page-head">
+          <h1>Library</h1>
+          <p class="sub">Browse the Sefaria library by category, then open any work in the reader. Everything Sefaria publishes is listed here.</p>
+        </header>
+        <div class="lib-toolbar">
+          <input id="lib-filter" type="text" autocomplete="off" spellcheck="false" placeholder="Filter works — Berakhot, Mishnah, Rashi, Genesis…">
+          <span id="lib-count" class="muted small"></span>
+        </div>
+        <div id="lib-breadcrumb" class="lib-trail hidden"></div>
+        <div id="lib-tree" class="lib-tree"></div>
+      </section>
+
+      <!-- SETTINGS ------------------------------------------------------- -->
+      <section id="view-settings" class="view hidden">
+        <header class="page-head">
+          <h1>Settings</h1>
+          <p class="sub">The AI provider powers question answering, selection translation, and context-aware word glosses. Search and reading work without it.</p>
+        </header>
+
+        <section class="card settings-card">
+          <h2>AI provider</h2>
+          <div class="form-grid">
+            <label>Provider
+              <select id="set-provider"></select>
+            </label>
+            <label>Model
+              <input id="set-model" type="text" list="set-model-list" placeholder="provider default" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="span2">Base URL
+              <input id="set-baseurl" type="text" autocomplete="off" spellcheck="false" placeholder="https://api.openai.com/v1">
+            </label>
+            <label class="span2">API key
+              <input id="set-apikey" type="password" autocomplete="off" placeholder="stored locally, encrypted when the OS supports it">
+            </label>
+          </div>
+          <p class="muted small" id="set-provider-hint"></p>
+          <p class="local-status hidden" id="set-local-status" role="status"></p>
+          <datalist id="set-model-list"></datalist>
+          <div class="row gap">
+            <button id="set-save" class="primary">Save</button>
+            <button id="set-test" class="ghost">Test connection</button>
+            <button id="set-local-check" class="ghost hidden">Check local model</button>
+            <button id="set-wizard" class="ghost">Run setup assistant</button>
+            <span id="set-status" class="status"></span>
+          </div>
+        </section>
+
+        <section class="card settings-card">
+          <h2>Reading</h2>
+          <div class="form-grid">
+            <label>Default transliteration
+              <select id="set-style">
+                <option value="modern">Modern Israeli</option>
+                <option value="ashkenazi">Ashkenazi</option>
+                <option value="mizrahi">Mizrahi</option>
+              </select>
+            </label>
+            <label>Text size
+              <input id="set-font" type="range" min="16" max="32" step="1">
+            </label>
+            <label class="check span2">
+              <input type="checkbox" id="set-diacritics">
+              <span>Use scholarly diacritics in Mizrahi transliteration (ḥ ʿ ṣ ṭ q, and rafe gimel/dalet/tav ḡ ḏ ṯ)</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="set-show-translit">
+              <span>Show transliteration by default</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="set-show-english">
+              <span>Show translation by default</span>
+            </label>
+          </div>
+          <p class="muted small" id="style-notes"></p>
+        </section>
+
+        <section class="card settings-card about">
+          <h2>About</h2>
+          <p>Sefaria Lens is an independent study tool. Texts, translations, links, and lexicon entries come from the
+            <a href="https://www.sefaria.org" data-external>Sefaria API</a> and remain under the license of each version.</p>
+          <p>Transliteration is generated locally by a rules engine modelling three reading traditions. It is a study aid,
+            not an authoritative vocalization: stress and a minority of qamatz-qatan and shva cases are approximate.
+            Where a source marks qamatz qatan, the engine follows the source.</p>
+          <p class="muted small" id="app-info"></p>
+        </section>
+      </section>
+    </main>
+
+    <aside class="context" id="context" aria-live="polite">
+      <div class="ctx-head">
+        <div>
+          <span class="ctx-kicker">Study panel</span>
+          <h2 id="ctx-title">Word study</h2>
+        </div>
+        <button id="ctx-close" class="icon-btn" title="Close panel">×</button>
+      </div>
+      <div id="ctx-body" class="ctx-body">
+        <div class="ctx-empty">
+          <p>Click a Hebrew word in the reader to see its dictionary entry, root, and transliteration in all three traditions.</p>
+          <p>Select a phrase to translate it in context.</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="seltool" class="seltool hidden">
+    <button data-sel="translate">Translate</button>
+    <button data-sel="translit">Transliterate</button>
+    <button data-sel="search">Search</button>
+  </div>
+
+  <div id="setup-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <div class="modal-card">
+      <div class="setup-mark" aria-hidden="true">א</div>
+      <h2 id="setup-title">Connect an AI provider</h2>
+      <p class="muted" id="setup-intro">Reading, search, and transliteration work without one. Questions and translation need a model. The key stays on this device.</p>
+      <div class="form-grid">
+        <label class="span2">Provider
+          <select id="setup-provider"></select>
+        </label>
+        <label>Model
+          <input id="setup-model" type="text" list="setup-model-list" autocomplete="off" spellcheck="false" placeholder="provider default">
+        </label>
+        <label>API key
+          <input id="setup-key" type="password" autocomplete="off" spellcheck="false" placeholder="paste your key">
+        </label>
+        <label class="span2 hidden" id="setup-base-wrap">Base URL
+          <input id="setup-base" type="text" autocomplete="off" spellcheck="false" placeholder="https://…/v1">
+        </label>
+      </div>
+      <p class="muted small" id="setup-hint"></p>
+      <p class="local-status hidden" id="setup-local-status" role="status"></p>
+      <datalist id="setup-model-list"></datalist>
+      <div class="row gap">
+        <button id="setup-save" class="primary">Save and start</button>
+        <button id="setup-test" class="ghost">Save and test</button>
+        <button id="setup-local-check" class="ghost hidden">Check local model</button>
+        <button id="setup-skip" class="ghost">Skip for now</button>
+        <span id="setup-status" class="status"></span>
+      </div>
+      <p class="muted tiny">You can change this any time in Settings. Without a provider, Ask returns unranked search results.</p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="bridge.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
