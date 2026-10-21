@@ -39,6 +39,34 @@ test('an unterminated footnote does not swallow the rest of the segment', () => 
 test('basic tags and entities', () => {
   assert.strictEqual(stripHtml('<b>hello</b> &amp; <i>world</i>'), 'hello & world');
   assert.strictEqual(stripHtml('line<br>break'), 'line break');
+  assert.strictEqual(stripHtml('&copy; &#1488; &#x5D0;'), '© א א');
+});
+
+test('the thin spaces around a paseq are decoded', () => {
+  // Sefaria's Masorah edition writes: אֱלֹהִים&thinsp;<small>׀</small>&thinsp;לָאוֹר
+  assert.strictEqual(
+    stripHtml('וַיִּקְרָ֨א אֱלֹהִ֤ים&thinsp;<small>׀</small>&thinsp;לָאוֹר֙'),
+    'וַיִּקְרָ֨א אֱלֹהִ֤ים ׀ לָאוֹר֙',
+  );
+  assert.strictEqual(stripHtml('תִּצְּרֶ֓נּוּ&thinsp;׀ מִן־הַדּ֖וֹר'), 'תִּצְּרֶ֓נּוּ ׀ מִן־הַדּ֖וֹר');
+});
+
+test('paragraph markers are scaffolding, not words', () => {
+  assert.strictEqual(
+    stripHtml('י֥וֹם אֶחָֽד׃&nbsp;<span class="mam-spi-pe">{פ}</span><br>'),
+    'י֥וֹם אֶחָֽד׃',
+  );
+  assert.strictEqual(
+    stripHtml('אֵֽלֶּה׃&nbsp;<span class="mam-spi-samekh">{ס}</span>&nbsp;'),
+    'אֵֽלֶּה׃',
+  );
+  // A marker that arrives without its span goes too.
+  assert.strictEqual(stripHtml('וַיְהִי־כֵֽן׃ {ס}'), 'וַיְהִי־כֵֽן׃');
+});
+
+test('an entity the table does not know never reaches the reader', () => {
+  assert.strictEqual(stripHtml('alph&alpha; beta&bogus;'), 'alph beta');
+  assert.strictEqual(stripHtml('one&thinsp;two'), 'one two');
 });
 
 test('parses Sefaria search ids', () => {

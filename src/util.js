@@ -1,15 +1,42 @@
 'use strict';
 
+// Named entities Sefaria's texts actually contain. The important one is
+// &thinsp;: the Masoretic text wraps the paseq (׀) in thin spaces, so without
+// this entry the reader showed the literal "&thinsp;׀" in Psalms and the Torah.
+// An entity missing from this table is dropped rather than shown, so markup can
+// never leak into the reading text again.
 const ENTITIES = {
-  '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'",
-  '&apos;': "'", '&nbsp;': ' ', '&mdash;': '—', '&ndash;': '–', '&hellip;': '…',
+  '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'",
+  // spaces and invisible marks
+  '&nbsp;': ' ', '&ensp;': '\u2002', '&emsp;': '\u2003', '&thinsp;': '\u2009',
+  '&hairsp;': '\u200A', '&numsp;': '\u2007', '&puncsp;': '\u2008',
+  '&zwnj;': '\u200C', '&zwj;': '\u200D', '&zwsp;': '\u200B',
+  '&lrm;': '\u200E', '&rlm;': '\u200F', '&shy;': '\u00AD',
+  // typography
+  '&ndash;': '–', '&mdash;': '—', '&hellip;': '…', '&bull;': '•',
+  '&middot;': '·', '&lsquo;': '‘', '&rsquo;': '’', '&sbquo;': '‚',
+  '&ldquo;': '“', '&rdquo;': '”', '&bdquo;': '„', '&lsaquo;': '‹',
+  '&rsaquo;': '›', '&laquo;': '«', '&raquo;': '»', '&prime;': '′',
+  '&Prime;': '″', '&oline;': '‾', '&frasl;': '⁄', '&dagger;': '†',
+  '&Dagger;': '‡', '&sect;': '§', '&para;': '¶', '&deg;': '°',
+  '&plusmn;': '±', '&times;': '×', '&divide;': '÷', '&minus;': '−',
+  '&frac12;': '½', '&frac14;': '¼', '&frac34;': '¾', '&sup1;': '¹',
+  '&sup2;': '²', '&sup3;': '³', '&micro;': 'µ', '&permil;': '‰',
+  '&cent;': '¢', '&pound;': '£', '&yen;': '¥', '&euro;': '€',
+  '&copy;': '©', '&reg;': '®', '&trade;': '™',
+  // arrows and signs used in scholarly notes
+  '&larr;': '←', '&rarr;': '→', '&uarr;': '↑', '&darr;': '↓',
+  '&harr;': '↔', '&lArr;': '⇐', '&rArr;': '⇒', '&hArr;': '⇔',
+  '&le;': '≤', '&ge;': '≥', '&ne;': '≠', '&asymp;': '≈',
+  '&infin;': '∞', '&sum;': '∑', '&prod;': '∏', '&radic;': '√',
 };
 
 function decodeEntities(s) {
   return s
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
     .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
-    .replace(/&[a-z]+;/gi, (m) => ENTITIES[m.toLowerCase()] ?? m);
+    .replace(/&([a-zA-Z][a-zA-Z0-9]+);/g, (m, name) =>
+      ENTITIES[m] ?? ENTITIES[`&${name.toLowerCase()};`] ?? '');
 }
 
 /**
@@ -49,10 +76,16 @@ function stripHtml(input) {
   s = s.replace(/<sup[^>]*class="footnote-marker"[^>]*>[\s\S]*?<\/sup>/gi, '');
   s = dropFootnotes(s);
   s = s.replace(/<sup[^>]*>[\s\S]*?<\/sup>/gi, '');
+  // The Masorah edition closes a paragraph with a wrapped marker
+  // ("&nbsp;<span class=\"mam-spi-pe\">{פ}</span>"). It is page furniture, not
+  // words, and reads as debris inline, so the whole marker goes.
+  s = s.replace(/<span[^>]*class="[^"]*mam-spi-[^"]*"[^>]*>[\s\S]*?<\/span>/gi, '');
   s = s.replace(/<br\s*\/?>/gi, ' ');
   s = s.replace(/<\/?(?:b|i|em|strong|big|small|span|div|p|a|u|h1|h2|h3)[^>]*>/gi, '');
   s = s.replace(/<[^>]+>/g, '');
   s = decodeEntities(s);
+  // A marker left without its span (or any other stray section sign).
+  s = s.replace(/\s*\{[פס]\}/g, '');
   return s.replace(/\s+/g, ' ').trim();
 }
 
@@ -112,4 +145,23 @@ function normQuery(s) {
   return String(s || '').replace(/\s+/g, ' ').trim();
 }
 
-module.exports = { stripHtml, toSegments, decodeEntities, isHebrew, parseSearchId, clip, normQuery };
+/**
+ * Rough token count, for keeping a prompt inside the model's context window.
+ *
+ * A pointed Hebrew word costs far more tokens than its length suggests — a
+ * local model spends roughly one token per character and a half of niqqud-laden
+ * text, against four characters per token for English. Estimated on that split
+ * with a little headroom, which is enough to trim a candidate list before it is
+ * sent; the real count comes back from the server afterwards.
+ */
+function estimateTokens(s) {
+  const text = String(s == null ? '' : s);
+  if (!text) return 0;
+  const hebrew = (text.match(/[\u0590-\u05FF]/g) || []).length;
+  const other = text.length - hebrew;
+  return Math.ceil(hebrew / 1.55 + other / 4) + 1;
+}
+
+module.exports = {
+  stripHtml, toSegments, decodeEntities, isHebrew, parseSearchId, clip, normQuery, estimateTokens,
+};

@@ -34,6 +34,16 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+// Progress from a running generation (token deltas, phases), broadcast to the
+// page the same way the desktop app sends IPC events.
+const listeners = new Set();
+function emit(payload) {
+  const line = `data: ${JSON.stringify(payload)}\n\n`;
+  for (const res of listeners) {
+    try { res.write(line); } catch { listeners.delete(res); }
+  }
+}
+
 function sendJson(res, status, body) {
   const data = JSON.stringify(body);
   res.writeHead(status, {
@@ -47,16 +57,34 @@ function sendJson(res, status, body) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  if (req.method === 'GET' && url.pathname === '/events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store',
+      Connection: 'keep-alive',
+    });
+    res.write(': connected\n\n');
+    listeners.add(res);
+    req.on('close', () => listeners.delete(res));
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/rpc') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; if (body.length > 2e6) req.destroy(); });
     req.on('end', async () => {
       let payload;
       try { payload = JSON.parse(body || '{}'); } catch { return sendJson(res, 400, { ok: false, error: { message: 'Bad JSON', code: 'BAD_REQUEST' } }); }
+      let done = false;
+      // The page reloading or closing mid-question means nobody will read the
+      // answer; stop the model rather than burn a minute of GPU on it.
+      res.on('close', () => { if (!done) service.abortAll(); });
       try {
-        const data = await service.call(payload.method, payload.params || {});
+        const data = await service.call(payload.method, payload.params || {}, { emit });
+        done = true;
         sendJson(res, 200, { ok: true, data });
       } catch (err) {
+        done = true;
         sendJson(res, 200, { ok: false, error: { message: err.message, code: err.code || 'ERROR' } });
       }
     });

@@ -15,4 +15,12 @@ contextBridge.exposeInMainWorld('sefariaLens', {
     return res.data;
   },
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  // Progress from a running generation: token deltas, phase changes, timings.
+  // The renderer routes them by request id, so an abandoned answer can never
+  // paint over a newer one.
+  onEvent: (cb) => {
+    const handler = (_event, payload) => { try { cb(payload); } catch { /* a listener error is not fatal */ } };
+    ipcRenderer.on('event', handler);
+    return () => ipcRenderer.removeListener('event', handler);
+  },
 });

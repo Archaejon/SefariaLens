@@ -305,6 +305,13 @@ function createWindow() {
     });
   }
 
+  // A reload or a navigation tears down the page that was waiting for an
+  // answer. Stop the model instead of letting it finish into nothing.
+  mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) service.abortAll();
+  });
+  mainWindow.on('closed', () => { service.abortAll(); mainWindow = null; });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
@@ -324,7 +331,12 @@ app.whenReady().then(() => {
 
   ipcMain.handle('rpc', async (_event, method, params) => {
     try {
-      const data = await service.call(method, params);
+      const data = await service.call(method, params, {
+        emit: (payload) => {
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          mainWindow.webContents.send('event', payload);
+        },
+      });
       return { ok: true, data };
     } catch (err) {
       return { ok: false, error: { message: err.message, code: err.code || 'ERROR' } };

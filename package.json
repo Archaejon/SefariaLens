@@ -1,8 +1,8 @@
 {
   "name": "sefaria-lens",
   "productName": "Sefaria Lens",
-  "version": "1.0.0",
-  "description": "Sefaria reader with sourced Q&A, tri-tradition transliteration, and word-by-word study tools",
+  "version": "1.0.10",
+  "description": "Sefaria reader with sourced Q&A, transliteration in five traditions, and word-by-word study tools",
   "main": "electron/main.js",
   "private": true,
   "scripts": {
@@ -10,7 +10,8 @@
     "dev": "node tools/devserver.js",
     "test": "node --test test/*.test.js",
     "icon": "node tools/make-icon.js",
-    "dist": "electron-builder --win portable --x64"
+    "dist": "electron-builder --win portable --x64",
+    "freebuff-fifo": "node tools/freebuff-fifo.js"
   },
   "author": "Sefaria Lens contributors",
   "license": "MIT",

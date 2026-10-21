@@ -10,6 +10,8 @@ const { Settings } = require('./settings.js');
 const { ask, gloss, translateSelection, translateSegments, CATEGORIES, isPrimaryWork } = require('./answer.js');
 const { Cache } = require('./cache.js');
 const { transliterate, wordInfo, STYLE_INFO } = require('./translit.js');
+const { readingFor } = require('./divine-name.js');
+const { buildChapters } = require('./chapters.js');
 const { stripHtml, clip } = require('./util.js');
 
 /**
@@ -63,78 +65,50 @@ function firstRefForSchema(node, title) {
  * The single service layer. Both the Electron IPC bridge and the browser dev
  * harness call these methods, so behaviour stays identical in both shells.
  */
-function createService({ appDataDir, version = '1.0.0', platform = process.platform, encrypt, decrypt }) {
+function createService({
+  appDataDir, version = '1.0.0', platform = process.platform, encrypt, decrypt,
+  // Test seams: a stubbed library or model layer, so the service can be
+  // exercised without the network.
+  sefaria: sefariaImpl, llm: llmImpl,
+}) {
   fs.mkdirSync(appDataDir, { recursive: true });
   const settings = new Settings(path.join(appDataDir, 'settings.json'), { encrypt, decrypt });
-  const sefaria = new Sefaria({ cacheDir: path.join(appDataDir, 'cache') });
-  const llm = new LLM({ getSettings: () => settings.get() });
+  const sefaria = sefariaImpl || new Sefaria({ cacheDir: path.join(appDataDir, 'cache') });
+  const llm = llmImpl || new LLM({ getSettings: () => settings.get() });
   const translationCache = new Cache(path.join(appDataDir, 'cache'), { ttlMs: 1000 * 60 * 60 * 24 * 30 });
+  // A gloss is stable for as long as the verse and the model are, and it costs
+  // a local model twenty seconds to write. Clicking the same word twice, or
+  // opening the same verse tomorrow, should be free.
+  const glossCache = new Cache(path.join(appDataDir, 'cache'), { ttlMs: 1000 * 60 * 60 * 24 * 30 });
+  // Shapes are small and stable for the life of a session; the reader asks for
+  // one on every passage it opens.
+  const chapterCache = new Map();
 
-  /**
-   * Fill in an English translation wherever the edition has none.
-   *
-   * Editions are often translated in part — a commentary whose first three
-   * segments have English and whose remaining fifteen do not — so this works
-   * per segment rather than giving up when any English exists. Rows that
-   * already carry a published translation are never overwritten.
-   */
-  async function addMachineEnglish(rows, ref) {
-    const missing = [];
-    rows.forEach((row, index) => {
-      if (row.he && row.he.trim() && !(row.en && row.en.trim())) missing.push({ index, he: row.he });
-    });
-    const hasHebrew = rows.some((r) => r.he && r.he.trim());
-    if (!hasHebrew || !missing.length) return { machineTranslation: false, translationNote: '' };
-    if (!llm.config().configured) {
-      return {
-        machineTranslation: false,
-        translationNote: missing.length === rows.length
-          ? 'No published English translation. Add an AI provider in Settings to generate one.'
-          : `${missing.length} of ${rows.length} segments have no published English. Add an AI provider in Settings to translate them.`,
-      };
-    }
-    try {
-      const result = await translateSegments({
-        segments: missing.map((m) => m.he),
-        ref,
-      }, { llm, cache: translationCache });
-      let filled = 0;
-      missing.forEach((m, i) => {
-        const en = (result.en[i] || '').trim();
-        if (!en) return;
-        rows[m.index].en = en;
-        rows[m.index].machineTranslation = true;
-        filled += 1;
-      });
-      return {
-        machineTranslation: filled > 0,
-        translationNote: filled === rows.length
-          ? `AI translation of a text Sefaria publishes without English (${llm.config().model}).`
-          : `AI translation filled ${filled} of ${rows.length} segments that Sefaria publishes without English (${llm.config().model}).`,
-      };
-    } catch (err) {
-      return {
-        machineTranslation: false,
-        translationNote: `No published English translation for ${missing.length} of ${rows.length} segments, and the AI translation failed: ${err.message}`,
-      };
-    }
-  }
+  /** A renderer-supplied reading, defaulting to the casual HaShem. */
+  const divineParam = (value) => (value === 'adonai' ? 'adonai' : 'hashem');
 
-  const withTranslit = (he) => {
+  // `divine` is the reading substituted for the Tetragrammaton: 'adonai' in
+  // liturgy, 'hashem' everywhere else (see src/divine-name.js).
+  const withTranslit = (he, divine = 'hashem') => {
     const text = Array.isArray(he) ? he.join(' ') : (he || '');
     if (!text) return null;
     const diacritics = settings.get().diacritics !== false;
+    const read = (style) => transliterate(text, { style, diacritics, divineName: divine });
     const result = {
-      modern: transliterate(text, { style: 'modern', diacritics }),
-      ashkenazi: transliterate(text, { style: 'ashkenazi', diacritics }),
-      mizrahi: transliterate(text, { style: 'mizrahi', diacritics }),
+      modern: read('modern'),
+      ashkenazi: read('ashkenazi'),
+      mizrahi: read('mizrahi'),
+      yemeni: read('yemeni'),
+      kavkazi: read('kavkazi'),
+      ancient: read('ancient'),
+      'ancient-hard': read('ancient-hard'),
     };
-    // An unvocalized edition cannot be transliterated; showing the Hebrew back
-    // again would just duplicate the source line. Mixed texts (a pointed
-    // commentary quoting an unpointed lemma) still get a line.
-    const heb = (result.modern.match(/[\u05D0-\u05EA]/g) || []).length;
-    const latin = (result.modern.match(/[A-Za-z]/g) || []).length;
-    if (heb > 2 && latin < heb) return null;
+    // An edition the source never vocalizes has no reading to offer: the line
+    // would be a run of bare consonants. Mixed texts (a pointed commentary
+    // quoting an unpointed lemma) still get a line.
+    const letters = (text.match(/[\u05D0-\u05EA]/g) || []).length;
+    const points = (text.match(/[\u05B0-\u05BB\u05C7]/g) || []).length;
+    if (!letters || points / letters < 0.08) return null;
     return result;
   };
 
@@ -142,6 +116,9 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
   async function loadText(ref, version = 'english') {
     const text = await sefaria.text(ref, { version });
     const segments = Math.max(text.he.length, text.en.length);
+    // One classification for the whole passage: Adonai in a siddur or haggadah,
+    // HaShem in a commentary or a daf.
+    const divine = readingFor(text);
     const rows = [];
     for (let i = 0; i < segments; i++) {
       const he = text.he[i] || '';
@@ -149,19 +126,19 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
       rows.push({
         he,
         en,
-        translit: he ? withTranslit(he) : null,
+        translit: he ? withTranslit(he, divine) : null,
       });
     }
     const versionLanguage = text.enVersion ? text.enVersion.language : 'english';
     // Never machine-translate over a chosen non-English edition: the reader
     // asked for that language, and mixing generated English into it would be
-    // both misleading and wrong. English versions still get gap-filling.
-    const english = versionLanguage === 'english'
-      ? await addMachineEnglish(rows, text.ref)
-      : {
-        machineTranslation: false,
-        translationNote: `${text.enVersion.title} (${text.enVersion.languageLabel}) covers ${rows.filter((r) => r.en && r.en.trim()).length} of ${rows.length} segments in this passage. Switch the translation back to an English version for English text.`,
-      };
+    // both misleading and wrong.
+    const missingEnglish = rows.filter((r) => r.he && r.he.trim() && !(r.en && r.en.trim())).length;
+    const translationNote = versionLanguage === 'english'
+      ? (missingEnglish
+        ? `${missingEnglish} of ${rows.length} segments have no published English translation.`
+        : '')
+      : `${text.enVersion.title} (${text.enVersion.languageLabel}) covers ${rows.filter((r) => r.en && r.en.trim()).length} of ${rows.length} segments in this passage. Switch the translation back to an English version for English text.`;
 
     return {
       ref: text.ref,
@@ -170,6 +147,7 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
       heTitle: text.heTitle,
       categories: text.categories,
       primaryCategory: text.primaryCategory,
+      divineName: divine,
       segRefs: segmentRefsFor(text.ref, segments),
       sectionNames: text.sectionNames,
       next: text.next,
@@ -187,8 +165,12 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
       },
       license: text.license,
       firstAvailableSectionRef: text.firstAvailableSectionRef,
-      machineTranslation: english.machineTranslation,
-      translationNote: english.translationNote,
+      machineTranslation: false,
+      missingEnglish,
+      // The reader offers this as a button; nothing is generated until it is
+      // pressed.
+      canAiTranslate: versionLanguage === 'english' && missingEnglish > 0 && llm.config().configured,
+      translationNote,
     };
   }
 
@@ -212,6 +194,10 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
   // Questions in flight, so the renderer's Stop button can abort the model
   // call instead of only hiding the spinner.
   const askInFlight = new Map();
+  // Clicking a second word makes the first lookup obsolete: it is aborted, not
+  // left to finish and race the newer one.
+  let glossInFlight = null;
+  let translateInFlight = null;
 
   const methods = {
     'app.info': async () => ({
@@ -237,6 +223,12 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
     // whether the chosen model is actually installed, before anything is saved.
     'llm.status': async (overrides = {}) => llm.status(overrides),
 
+    // What is in memory, and how it is placed (VRAM against system RAM).
+    'llm.ps': async () => ({ models: await llm.ps() }),
+
+    // Give the model's memory back now instead of waiting for keep_alive.
+    'llm.free': async () => llm.freeMemory(),
+
     'search': async ({ query, size = 14 } = {}) => {
       const result = await sefaria.search(query, { size });
       return result;
@@ -245,6 +237,33 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
     'text': async ({ ref, version = 'english' } = {}) => loadText(ref, version),
 
     'library.toc': async () => sefaria.toc(),
+
+    /**
+     * Sections and chapters of one work, so the library can show a chapter grid
+     * without opening the text, and the reader can offer a jump control.
+     */
+    'library.chapters': async ({ title } = {}) => {
+      const asked = String(title || '').trim();
+      if (!asked) throw Object.assign(new Error('A work title is required'), { code: 'BAD_INPUT' });
+      if (chapterCache.has(asked)) return chapterCache.get(asked);
+      let index = null;
+      try { index = await sefaria.index(asked); } catch { /* shape alone still helps */ }
+      const canonical = (index && index.title) || asked;
+      let shape = [];
+      try { shape = await sefaria.shape(canonical); } catch { shape = []; }
+      const book = buildChapters({
+        title: canonical,
+        heTitle: (index && index.heTitle) || '',
+        categories: (index && index.categories) || [],
+        addressTypes: (index && index.addressTypes) || [],
+        sectionNames: (index && index.sectionNames) || [],
+        depth: (index && index.textDepth) || 0,
+        shape,
+      });
+      chapterCache.set(asked, book);
+      if (canonical !== asked) chapterCache.set(canonical, book);
+      return book;
+    },
 
     /**
      * Commentary, Midrash, Targum and other works Sefaria links to this passage,
@@ -349,20 +368,36 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
       throw lastErr || Object.assign(new Error('Could not open that work'), { code: 'NOT_FOUND' });
     },
 
-    'words': async ({ word } = {}) => {
+    'words': async ({ word, divineName } = {}) => {
       const entries = await sefaria.words(word);
-      return { word, entries, translit: wordInfo(stripHtml(word || '')) };
+      return {
+        word,
+        entries,
+        translit: wordInfo(stripHtml(word || ''), { divineName: divineParam(divineName) }),
+      };
     },
 
     'links': async ({ ref } = {}) => sefaria.links(ref, { withText: false }),
 
-    'ask': async ({ question, category = null, limit = 4, requestId } = {}) => {
+    'ask': async ({ question, category = null, limit = 4, requestId, context = null } = {}, ctx = {}) => {
       const key = requestId ? String(requestId) : '';
       const ctrl = new AbortController();
       if (key) askInFlight.set(key, ctrl);
+      const emit = ctx.emit ? (event) => ctx.emit({ type: 'ask', requestId: key, ...event }) : null;
+      const onDraft = emit ? (text) => emit({ phase: 'draft', text }) : undefined;
       let result;
       try {
-        result = await ask({ question, category, limit, sefaria, llm, signal: ctrl.signal });
+        result = await ask({
+          question,
+          category,
+          limit,
+          context,
+          sefaria,
+          llm,
+          signal: ctrl.signal,
+          onDraft,
+          onStatus: emit ? (event) => emit({ phase: event.phase, model: event.model, timings: event.timings }) : undefined,
+        });
         if (ctrl.signal.aborted) {
           const err = new Error('Cancelled.');
           err.code = 'CANCELLED';
@@ -381,7 +416,14 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
             machineTranslation = Boolean(en);
           } catch { /* leave untranslated */ }
         }
-        return { ...source, en, machineTranslation, translit: withTranslit(source.he) };
+        const divine = readingFor(source);
+        return {
+          ...source,
+          en,
+          machineTranslation,
+          divineName: divine,
+          translit: withTranslit(source.he, divine),
+        };
       }));
       return result;
     },
@@ -393,30 +435,118 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
       return { cancelled: true };
     },
 
-    'gloss': async ({ word, verseHe, verseEn } = {}) => {
+    // The window went away (a reload, a closed tab). Nothing is listening for
+    // the answer any more, so the model should stop now rather than finish a
+    // minute of work into the void.
+    'ai.cancelAll': async () => {
+      const n = askInFlight.size;
+      for (const ctrl of askInFlight.values()) ctrl.abort();
+      askInFlight.clear();
+      if (glossInFlight) glossInFlight.abort();
+      if (translateInFlight) translateInFlight.abort();
+      return { cancelled: n };
+    },
+
+    'gloss': async ({ word, verseHe, verseEn, divineName } = {}) => {
       const entries = await sefaria.words(word);
-      const out = await gloss({ word, verseHe, verseEn, lexicon: entries }, { llm });
-      return { ...out, entries, translit: wordInfo(stripHtml(word || '')) };
+      const model = llm.config().model || 'none';
+      const key = `${model}|${word}|${verseHe || ''}|${verseEn || ''}`;
+      if (glossInFlight) glossInFlight.abort();
+      const ctrl = new AbortController();
+      glossInFlight = ctrl;
+      let out;
+      let fromCache = false;
+      try {
+        const hit = glossCache.get('gloss', key);
+        if (hit !== undefined) {
+          out = hit;
+          fromCache = true;
+        } else {
+          out = await gloss(
+            { word, verseHe, verseEn, lexicon: entries },
+            { llm, signal: ctrl.signal },
+          );
+          // A fallback from the lexicon is shown but not remembered: the model
+          // may simply have been busy.
+          if (!out.degraded) glossCache.set('gloss', key, out);
+        }
+      } finally {
+        if (glossInFlight === ctrl) glossInFlight = null;
+      }
+      return {
+        ...out,
+        cached: fromCache,
+        entries,
+        translit: wordInfo(stripHtml(word || ''), { divineName: divineParam(divineName) }),
+      };
     },
 
-    'translate': async ({ text, contextHe, contextEn, target } = {}) => {
+    'translate': async ({ text, contextHe, contextEn, target, divineName } = {}) => {
       const out = await translateSelection({ text, contextHe, contextEn, target }, { llm });
-      return { ...out, translit: withTranslit(stripHtml(text || '')) };
+      return { ...out, translit: withTranslit(stripHtml(text || ''), divineParam(divineName)) };
     },
 
-    'translit': async ({ text, style } = {}) => {
+    /**
+     * Translate the segments of a passage that the edition leaves untranslated.
+     * Called only from the reader's button (or the auto-translate setting),
+     * never from loading the passage.
+     */
+    'translate.missing': async ({ ref, segments = [], requestId } = {}, ctx = {}) => {
+      const he = (segments || []).map((s) => String(s || ''));
+      if (!ref || !he.length) return { en: [], note: '' };
+      if (!llm.config().configured) {
+        throw Object.assign(
+          new Error('No AI provider is configured. Add one in Settings to translate this text.'),
+          { code: 'NO_API_KEY' },
+        );
+      }
+      if (translateInFlight) translateInFlight.abort();
+      const ctrl = new AbortController();
+      translateInFlight = ctrl;
+      const emit = ctx.emit ? (event) => ctx.emit({ type: 'translate', requestId, ...event }) : null;
+      try {
+        if (emit) emit({ phase: 'starting' });
+        const result = await translateSegments({ segments: he, ref }, {
+          llm,
+          cache: translationCache,
+          signal: ctrl.signal,
+          onProgress: emit ? (batch, total) => emit({ phase: 'generating', batch, total }) : undefined,
+        });
+        if (emit) emit({ phase: 'done' });
+        return {
+          en: result.en,
+          note: `AI translation of ${he.length} segment${he.length === 1 ? '' : 's'} Sefaria publishes without English (${llm.config().model}).`,
+        };
+      } finally {
+        if (translateInFlight === ctrl) translateInFlight = null;
+      }
+    },
+
+    'translate.cancel': async () => {
+      if (!translateInFlight) return { cancelled: false };
+      translateInFlight.abort();
+      return { cancelled: true };
+    },
+
+    'translit': async ({ text, style, divineName } = {}) => {
       const clean = stripHtml(text || '');
       const diacritics = settings.get().diacritics !== false;
       const chosen = style || settings.get().style || 'modern';
+      const divine = divineParam(divineName);
+      const read = (s) => transliterate(clean, { style: s, diacritics, divineName: divine });
       return {
         style: chosen,
-        out: transliterate(clean, { style: chosen, diacritics }),
+        out: read(chosen),
         all: {
-          modern: transliterate(clean, { style: 'modern', diacritics }),
-          ashkenazi: transliterate(clean, { style: 'ashkenazi', diacritics }),
-          mizrahi: transliterate(clean, { style: 'mizrahi', diacritics }),
+          modern: read('modern'),
+          ashkenazi: read('ashkenazi'),
+          mizrahi: read('mizrahi'),
+          yemeni: read('yemeni'),
+          kavkazi: read('kavkazi'),
+          ancient: read('ancient'),
+          'ancient-hard': read('ancient-hard'),
         },
-        word: wordInfo(stripHtml(text || '').split(/\s+/)[0] || ''),
+        word: wordInfo(stripHtml(text || '').split(/\s+/)[0] || '', { divineName: divine }),
       };
     },
 
@@ -430,11 +560,11 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
     ]),
   };
 
-  async function call(method, params = {}) {
+  async function call(method, params = {}, ctx = {}) {
     const fn = methods[method];
     if (!fn) throw Object.assign(new Error(`Unknown method: ${method}`), { code: 'NO_METHOD' });
     try {
-      return await fn(params || {});
+      return await fn(params || {}, ctx);
     } catch (err) {
       // Normalise into something the renderer can display and branch on.
       const e = new Error(err.message || 'Request failed');
@@ -445,7 +575,16 @@ function createService({ appDataDir, version = '1.0.0', platform = process.platf
     }
   }
 
-  return { call, methods, settings, sefaria, llm, withTranslit, appDataDir };
+  function abortAll() {
+    let cancelled = 0;
+    for (const ctrl of askInFlight.values()) { ctrl.abort(); cancelled += 1; }
+    askInFlight.clear();
+    if (glossInFlight) { glossInFlight.abort(); cancelled += 1; }
+    if (translateInFlight) { translateInFlight.abort(); cancelled += 1; }
+    return cancelled;
+  }
+
+  return { call, methods, settings, sefaria, llm, withTranslit, appDataDir, abortAll };
 }
 
 module.exports = { createService, segmentRefsFor };

@@ -1,6 +1,6 @@
 'use strict';
 
-const { stripHtml, clip } = require('./util.js');
+const { stripHtml, clip, estimateTokens } = require('./util.js');
 
 const CATEGORIES = [
   'Tanakh', 'Talmud', 'Mishnah', 'Midrash', 'Halakhah', 'Kabbalah',
@@ -22,6 +22,10 @@ const COMMENTARY_CATEGORIES = new Set([
 const THOUGHT_CATEGORIES = new Set(['Jewish Thought', 'Musar', 'Chasidut', 'Kabbalah', 'Philosophy']);
 const TIER_BOOST = { primary: 1.3, commentary: 1.12, thought: 1.0, other: 1.0 };
 const TIER_QUOTA = { primary: 6, commentary: 4, thought: 2, other: 2 };
+// A hit retrieved by a Tanakh-scoped search, or the passage the planner named
+// outright. These are the verses that actually narrate or legislate the subject,
+// and they are kept ahead of a later Talmudic or halakhic discussion of it.
+const SCRIPTURE_SLOTS = 4;
 const TIER_LABEL = {
   primary: 'Primary source',
   commentary: 'Commentary',
@@ -69,6 +73,7 @@ Priority, when more than one candidate answers the question:
 2. Works that comment on them: Rashi, Ramban, Ibn Ezra, Tosafot, Midrash, Targum, halakhic codes.
 3. Jewish thought and Mussar.
 Prefer the earliest tier that genuinely responds to the question. Reach for commentary when the primary text needs explanation, and say plainly when you are answering from commentary or later thought because no primary source speaks to the question.
+When a Tanakh verse narrates the event or states the law itself, prefer it over a later Talmudic or halakhic discussion of the same subject, and cite that verse first. A later passage is the better answer only when no Tanakh passage addresses the question.
 
 Hard rules:
 - Use ONLY the numbered candidate passages supplied by the user. Never introduce a source, book, or reference that is not in that list.
@@ -93,22 +98,52 @@ const ANSWER_SCHEMA = `Return ONLY a JSON object with this exact shape:
 }
 Pick 1-4 sources, best first, and only those you would defend as directly relevant (relevance 0-1). If nothing is directly relevant, return an empty sources list and say so in the answer.`;
 
-/** Step 1: turn a natural question into library search queries. */
-async function planQueries(llm, question, { signal } = {}) {
+/**
+ * A planner may return a ref as a string, with a parenthetical suffix
+ * ("Exodus 32:1-6 (Chumash)"), or as an object. Normalise all three into the
+ * plain ref Sefaria's text endpoint accepts; anything unrecognisable is
+ * dropped rather than sent as a guessed URL.
+ */
+function normalizeRef(value) {
+  if (value && typeof value === 'object') {
+    const book = String(value.book || value.title || value.ref || '').trim();
+    if (!book) return '';
+    const chapter = Number(value.chapter != null ? value.chapter : value.start);
+    if (!Number.isFinite(chapter)) return book;
+    const first = value.verseStart != null ? Number(value.verseStart) : Number(value.verse);
+    const last = value.verseEnd != null ? Number(value.verseEnd) : null;
+    if (!Number.isFinite(first)) return `${book} ${chapter}`.trim();
+    return `${book} ${chapter}:${first}${Number.isFinite(last) ? `-${last}` : ''}`;
+  }
+  return String(value || '')
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .replace(/\s*\[[^\]]*\]\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Step 1: turn a natural question into search queries and likely refs. */
+async function planQueries(llm, question, { signal, onStatus } = {}) {
   try {
     const plan = await llm.json([
-      { role: 'system', content: 'You convert questions into short search queries for the Sefaria library search engine. Prefer the vocabulary a classical source would use. Include original-language terms when the question is about a Hebrew concept.' },
+      { role: 'system', content: 'You plan searches for the Sefaria library of Jewish texts. Prefer the vocabulary a classical source would use. Include original-language terms when the question is about a Hebrew concept.' },
       {
         role: 'user',
-        content: `Question: ${question}\n\nReturn JSON: {"queries": ["...", "..."], "concepts": ["..."]}\n2-4 queries, each 2-6 words, no boolean operators. Include one Hebrew-language query only if a Hebrew term is central to the question.`,
+        content: `Question: ${question}\n\nReturn JSON: {"queries": ["...", "..."], "refs": ["..."]}\n2-3 queries, each 2-6 words, no boolean operators. Include one Hebrew-language query only if a Hebrew term is central to the question.\nrefs: at most one exact Sefaria reference for the passage that most directly answers the question, with a verse range where the passage is verses (for example "Exodus 32:1-6"). For a question about where an event appears, give the verses that narrate the event itself. Use a real Sefaria book name. Leave refs empty if unsure.`,
       },
-    ], { maxTokens: 300, temperature: 0.3, signal });
+    ], { task: 'plan', temperature: 0.1, signal, onStatus });
     const queries = (plan.queries || []).map((q) => String(q || '').trim()).filter(Boolean);
-    return { queries: queries.slice(0, 4), concepts: plan.concepts || [] };
+    // A ref the model invents is harmless: it is fetched from Sefaria and
+    // dropped when Sefaria has no such passage. Do not let a rambling answer
+    // turn into a long list of fetches.
+    const rawRefs = Array.isArray(plan.refs) ? plan.refs : (plan.refs ? [plan.refs] : []);
+    const refs = [...new Set(rawRefs.map(normalizeRef).filter((r) => r && r.length <= 80 && /\d/.test(r)))]
+      .slice(0, 3);
+    return { queries: queries.slice(0, 4), refs, concepts: plan.concepts || [] };
   } catch (err) {
     if (err.code === 'CANCELLED' || (signal && signal.aborted)) throw err;
     // Planning is an optimisation, not a requirement.
-    return { queries: [], concepts: [] };
+    return { queries: [], refs: [], concepts: [] };
   }
 }
 
@@ -136,6 +171,9 @@ const STOPWORDS = new Set([
   'explains', 'tell', 'teach', 'teaches', 'discuss', 'discusses', 'discussed',
   'regarding', 'concerning', 'view', 'views', 'think', 'thought', 'tradition',
   'traditional', 'judaism', 'jewish', 'relate', 'relates', 'address', 'addresses',
+  'mention', 'mentions', 'mentioned', 'reference', 'references', 'appear',
+  'appears', 'appeared', 'locate', 'located', 'verses', 'verse', 'passage',
+  'passages', 'story', 'account', 'narrative', 'happen', 'happens', 'happened',
 ]);
 
 function questionTerms(question) {
@@ -158,6 +196,32 @@ function fallbackQueries(question) {
   out.push(...terms.filter((t) => t.length > 2));
   for (let i = 0; i < terms.length - 1; i++) out.push(`${terms[i]} ${terms[i + 1]}`);
   return [...new Set(out.filter(Boolean))].slice(0, 6);
+}
+
+/**
+ * A Sefaria ref as a comparable span: book, chapter, first and last verse.
+ * "Exodus 32:1-6" covers verses 1-6; a bare chapter covers all of it. Refs
+ * without a chapter/verse pair (a Talmud daf) return null and are never used
+ * to suppress another hit.
+ */
+function refSpan(ref) {
+  const m = String(ref || '').trim().match(/^(.+?)\s+(\d+)(?::(\d+)(?:\s*-\s*(\d+))?)?(?:[ab])?$/);
+  if (!m) return null;
+  const verse = m[3] == null ? null : Number(m[3]);
+  return {
+    book: m[1].toLowerCase().replace(/\s+/g, ' '),
+    chapter: Number(m[2]),
+    start: verse == null ? 1 : verse,
+    end: m[4] ? Number(m[4]) : (verse == null ? Infinity : verse),
+  };
+}
+
+/** Does `ref` fall inside a span that is already a candidate? */
+function coveredBy(ref, span) {
+  if (!span) return false;
+  const own = refSpan(ref);
+  return Boolean(own && own.book === span.book && own.chapter === span.chapter
+    && own.start >= span.start && own.end <= span.end);
 }
 
 function aggregate(hitLists) {
@@ -198,10 +262,20 @@ async function orderByTier(sefaria, ranked) {
   }
   const tiered = ranked.map((hit) => {
     const title = workTitleOf(hit.ref);
-    return { ...hit, title, tier: tierFor(lookupPath(map, title), title) };
+    const path = lookupPath(map, title);
+    // A planned ref whose work the table of contents does not expose keeps the
+    // tier its own categories gave it instead of falling into "other".
+    return {
+      ...hit,
+      title,
+      tier: path.length ? tierFor(path, title) : (hit.tier || 'other'),
+      scripture: path.includes('Tanakh') || (hit.categories || []).includes('Tanakh'),
+    };
   });
   const weight = (h) => h.score * TIER_BOOST[h.tier] + h.hits * 2;
-  tiered.sort((a, b) => (tierRank(a.tier) - tierRank(b.tier)) || (weight(b) - weight(a)));
+  tiered.sort((a, b) => (tierRank(a.tier) - tierRank(b.tier))
+    || (Number(Boolean(b.scriptureScope)) - Number(Boolean(a.scriptureScope)))
+    || (weight(b) - weight(a)));
   return tiered;
 }
 
@@ -213,6 +287,7 @@ function tierRank(tier) {
 
 function byTierThenScore(a, b) {
   return (tierRank(a.tier) - tierRank(b.tier))
+    || (Number(Boolean(b.scriptureScope)) - Number(Boolean(a.scriptureScope)))
     || ((b.score || 0) + (b.hits || 0) * 2) - ((a.score || 0) + (a.hits || 0) * 2);
 }
 
@@ -245,6 +320,9 @@ function pickShortlist(tiered, size) {
     }
   };
   const byTier = (tier) => tiered.filter((h) => h.tier === tier);
+  // The verse that narrates or legislates the subject is the reason the person
+  // asked: keep those ahead of a later discussion even when it scores higher.
+  take(tiered.filter((h) => h.scriptureScope), SCRIPTURE_SLOTS);
   take(byTier('primary'), Math.max(3, Math.round(size * 0.6)));
   take(byTier('commentary'), Math.max(2, Math.round(size * 0.25)));
   take(byTier('thought'), Math.max(1, Math.round(size * 0.15)));
@@ -282,6 +360,8 @@ async function loadCandidates(sefaria, refs) {
         en,
         score: item.score,
         hits: item.hits,
+        scriptureScope: Boolean(item.scriptureScope),
+        planned: Boolean(item.planned),
         heVersion: text.heVersion,
         enVersion: text.enVersion,
         license: text.license,
@@ -291,40 +371,264 @@ async function loadCandidates(sefaria, refs) {
   return out;
 }
 
+/** Shape a Sefaria text response as a ranking candidate. */
+function passageFromText(text, ref, score) {
+  const he = (text.he || []).join(' ').trim();
+  const en = (text.en || []).join(' ').trim();
+  if (!he && !en) return null;
+  const categories = text.categories || [];
+  return {
+    ref,
+    heRef: text.heRef || '',
+    title: text.title || '',
+    categories,
+    primaryCategory: text.primaryCategory || '',
+    he,
+    en,
+    tier: tierFor(categories, text.title),
+    score,
+    hits: 1,
+    heVersion: text.heVersion,
+    enVersion: text.enVersion,
+    license: text.license,
+    scriptureScope: true,
+    planned: true,
+  };
+}
+
+/**
+ * Turn the refs the planner proposed into candidates. Sefaria still supplies
+ * the text, so a remembered passage is grounded: a ref that does not exist, or
+ * has no text, is dropped exactly like any other failed fetch.
+ *
+ * A planner can name a divine speech inside a narrative (Exodus 32:7-14)
+ * instead of the verses that tell the story (32:1-6). For a Tanakh passage
+ * that starts mid-chapter, the chapter opening is added as well, so the
+ * passage everyone means by "the Golden Calf" is always in front of the model.
+ */
+async function plannedPassages(sefaria, refs, { signal } = {}) {
+  const out = [];
+  for (const ref of refs || []) {
+    try {
+      const text = await abortable(sefaria.text(ref), signal);
+      let he = (text.he || []).slice();
+      let en = (text.en || []).slice();
+      let finalRef = text.ref || ref;
+      // A model that names a chapter rather than verses is trimmed to its
+      // opening when the chapter is long, where a narrative or a law code
+      // begins. Short chapters are kept whole: trimming Exodus 20 would cut
+      // off most of the Ten Commandments.
+      if (!/:\d/.test(ref) && Math.max(he.length, en.length) > 20) {
+        const n = Math.min(15, Math.max(he.length, en.length));
+        he = he.slice(0, n);
+        en = en.slice(0, n);
+        finalRef = `${ref}:1-${n}`;
+      }
+      const main = passageFromText({ ...text, he, en }, finalRef, 40);
+      if (!main) continue;
+      out.push(main);
+
+      const span = refSpan(finalRef);
+      const isTanakh = (text.categories || []).includes('Tanakh');
+      if (isTanakh && span && span.start > 1) {
+        const title = text.title || span.book;
+        const openingRef = `${title} ${span.chapter}:1-6`;
+        try {
+          const opening = await abortable(sefaria.text(openingRef), signal);
+          const candidate = passageFromText(opening, opening.ref || openingRef, 38);
+          if (candidate) out.push(candidate);
+        } catch { /* no chapter opening: the planned range still stands */ }
+      }
+    } catch { /* an invented or unavailable ref is simply skipped */ }
+  }
+  return out;
+}
+
+/**
+ * The two content words most likely to name the subject. The planner's refs
+ * are the precise route to a passage; these keep a lexical search inside
+ * Tanakh working when the planner is down or its ref is wrong.
+ */
+function scriptureTerms(question) {
+  const seen = new Set();
+  const terms = [];
+  for (const term of questionTerms(question)) {
+    const key = term.toLowerCase();
+    if (key.length < 3 || seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+  }
+  return terms.slice(-2);
+}
+
+/**
+ * Search Tanakh only. Sefaria's index is lexical, and a translation often never
+ * uses the questioner's phrase ("golden calf" does not occur in Exodus 32), so
+ * an unrestricted search can miss the Torah altogether and leave Talmud and
+ * later commentary to fill the page.
+ */
+async function scriptureScopedHits(sefaria, question) {
+  const terms = scriptureTerms(question);
+  if (!terms.length) return [];
+  const results = await Promise.all(terms.map(async (term) => {
+    try {
+      const hebrew = /[\u0590-\u05FF]/.test(term);
+      return await sefaria.search(term, {
+        size: 20,
+        filters: ['Tanakh'],
+        filterFields: ['path'],
+        ...(hebrew ? { field: 'naive_lemmatizer', slop: 4 } : {}),
+      });
+    } catch { return { hits: [] }; }
+  }));
+  const merged = new Map();
+  results.forEach((res) => {
+    const seen = new Set();
+    let taken = 0;
+    for (const hit of res.hits || []) {
+      if (taken >= 6) break;
+      if (seen.has(hit.ref)) continue;
+      seen.add(hit.ref);
+      taken += 1;
+      const score = hit.score * 1.12;
+      const prev = merged.get(hit.ref);
+      if (prev) {
+        prev.score = Math.max(prev.score, score);
+        prev.hits += 1;
+      } else {
+        merged.set(hit.ref, { ...hit, score, hits: 1, scriptureScope: true });
+      }
+    }
+  });
+  return [...merged.values()].sort((a, b) => (b.score + b.hits * 2) - (a.score + a.hits * 2));
+}
+
+/**
+ * How much of each passage reaches the prompt. A local model pays for every
+ * token twice — once to read it, once in wall-clock time — so the clips shrink
+ * before the candidate list does.
+ */
+const PASSAGE_CLIPS = {
+  local: [[260, 360], [200, 300], [150, 240], [120, 190]],
+  cloud: [[520, 680]],
+};
+
+function candidateBlock(c, i, heBudget, enBudget) {
+  const tier = TIER_LABEL[c.tier] || TIER_LABEL.other;
+  return `[${i + 1}] ${c.ref}\nTier: ${tier}\nCategory: ${(c.categories || []).join(' > ') || c.primaryCategory || 'unknown'}\n`
+    + `Hebrew/Aramaic: ${clip(c.he, heBudget) || '(none)'}\nEnglish: ${clip(c.en, enBudget) || '(none)'}`;
+}
+
+/**
+ * Keep the ranking prompt inside the model's context window.
+ *
+ * Ollama silently drops the front of an over-long prompt, which would take the
+ * rules with it, so the list is trimmed here instead: shorten the passages
+ * first, then drop candidates from the end, and never go below three.
+ */
+function fitPrompt(candidates, { question, context, schema, budget, local }) {
+  const overhead = estimateTokens(SYSTEM) + estimateTokens(schema)
+    + estimateTokens(question) + estimateTokens(context || '') + 64;
+  const levels = PASSAGE_CLIPS[local ? 'local' : 'cloud'];
+  let best = null;
+  for (const [heBudget, enBudget] of levels) {
+    const blocks = candidates.map((c, i) => candidateBlock(c, i, heBudget, enBudget));
+    let used = overhead;
+    let keep = 0;
+    for (const block of blocks) {
+      const cost = estimateTokens(block);
+      if (used + cost > budget) break;
+      used += cost;
+      keep += 1;
+    }
+    keep = Math.max(keep, Math.min(3, blocks.length));
+    best = { blocks: blocks.slice(0, keep), heBudget, enBudget, keep, tokens: used };
+    if (keep === blocks.length) return best;
+  }
+  return best;
+}
+
+/**
+ * The answer field of a JSON object that is still arriving. The ranker replies
+ * with JSON, so painting its raw output would show braces and escapes; this
+ * finds the `answer` string and returns as much of it as has been generated.
+ */
+function partialJsonString(text, field = 'answer') {
+  const head = new RegExp(`"${field}"\\s*:\\s*"`).exec(String(text || ''));
+  if (!head) return '';
+  let out = '';
+  for (let i = head.index + head[0].length; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '\\') {
+      const next = text[i + 1];
+      if (next === undefined) break;
+      if (next === 'u') {
+        const hex = text.slice(i + 2, i + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 5;
+        continue;
+      }
+      out += next === 'n' ? '\n' : next === 't' ? '\t' : next;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+  }
+  return out;
+}
+
 /** Step 3: LLM ranks candidates and writes grounded justifications. */
-async function rankWithLLM(llm, question, candidates, limit, { signal } = {}) {
+async function rankWithLLM(llm, question, candidates, limit, { signal, context = '', onDraft, onStatus } = {}) {
   // A local model on a CPU typically runs with a 4k context and generates a
   // few tokens a second. Shorter passages and a smaller answer budget keep the
   // whole request inside that context and finish in a reasonable time; cloud
   // models can still read the full text.
-  const local = Boolean(llm.config && llm.config().local);
-  const heBudget = local ? 260 : 520;
-  const enBudget = local ? 360 : 680;
-  const list = candidates.map((c, i) => {
-    const he = clip(c.he, heBudget);
-    const en = clip(c.en, enBudget);
-    const tier = TIER_LABEL[c.tier] || TIER_LABEL.other;
-    return `[${i + 1}] ${c.ref}\nTier: ${tier}\nCategory: ${(c.categories || []).join(' > ') || c.primaryCategory || 'unknown'}\nHebrew/Aramaic: ${he || '(none)'}\nEnglish: ${en || '(none)'}`;
-  }).join('\n\n');
+  const cfg = llm.config ? llm.config() : {};
+  const local = Boolean(cfg.local);
+  const profile = llm.task ? llm.task('rank') : { maxTokens: 450, temperature: 0.2 };
+  const budget = llm.promptBudget
+    ? llm.promptBudget(profile, cfg)
+    : (local ? 3200 : 12000);
+  const asked = `Question: ${question}`;
+  const fitted = fitPrompt(candidates, { question: asked, context, schema: ANSWER_SCHEMA, budget, local });
+  const considered = candidates.slice(0, fitted.keep);
 
+  let draft = '';
   const result = await llm.json([
     { role: 'system', content: SYSTEM },
     {
       role: 'user',
-      content: `Question: ${question}\n\nCandidate passages from Sefaria (${candidates.length} total):\n\n${list}\n\n${ANSWER_SCHEMA}`,
+      content: `${asked}\n${context ? `\nThe question refers to this selected text:\n${clip(context, 700)}\n` : ''}\nCandidate passages from Sefaria (${considered.length} total):\n\n${fitted.blocks.join('\n\n')}\n\n${ANSWER_SCHEMA}`,
     },
-  ], { maxTokens: local ? 450 : 1500, temperature: 0.2, signal });
+  ], {
+    task: 'rank',
+    temperature: 0.2,
+    signal,
+    onStatus,
+    ...(onDraft ? {
+      onToken: (delta) => {
+        draft += delta;
+        const partial = partialJsonString(draft, 'answer');
+        if (partial) onDraft(partial);
+      },
+    } : {}),
+  });
 
   const picks = (Array.isArray(result.sources) ? result.sources : [])
     .map((s) => ({ ...s, index: Number(s.index) }))
-    .filter((s) => Number.isInteger(s.index) && s.index >= 1 && s.index <= candidates.length)
+    .filter((s) => Number.isInteger(s.index) && s.index >= 1 && s.index <= considered.length)
     .slice(0, limit);
 
   return {
     answer: typeof result.answer === 'string' ? result.answer.trim() : '',
-    picks: distinctJustifications(picks, candidates, question),
+    picks: distinctJustifications(picks, considered, question),
     confidence: result.confidence || 'medium',
     caveats: result.caveats || '',
+    considered: considered.length,
+    promptTokens: fitted.tokens,
+    clipBudget: { he: fitted.heBudget, en: fitted.enBudget },
   };
 }
 
@@ -398,13 +702,17 @@ function abortable(promise, signal) {
   });
 }
 
-async function ask({ question, category = null, limit = 4, sefaria, llm, signal }) {
+async function ask({ question, category = null, limit = 4, context = null, sefaria, llm, signal, onDraft, onStatus }) {
   if (!question || !question.trim()) throw new Error('Enter a question first.');
   const q = question.trim();
+  // A question asked about a highlighted passage carries that passage into
+  // retrieval, but the answer still answers the question itself.
+  const contextText = String(context || '').trim().slice(0, 1200);
+  const retrievalQuestion = contextText ? `${q}\n${contextText}` : q;
   const started = Date.now();
   if (signal && signal.aborted) throw cancelled();
 
-  const plan = await planQueries(llm, q, { signal });
+  const plan = await planQueries(llm, retrievalQuestion, { signal, onStatus });
   if (signal && signal.aborted) throw cancelled();
   // Planned queries first, but never at the cost of the keyword fallbacks: a
   // model that returns four long phrases can otherwise fill the whole list,
@@ -417,19 +725,60 @@ async function ask({ question, category = null, limit = 4, sefaria, llm, signal 
     .map((s) => String(s).trim()).filter(Boolean))]
     .slice(0, 6);
 
-  const searches = await abortable(Promise.all(queries.map(async (query) => {
-    try {
-      return await sefaria.search(query, { size: 10 });
-    } catch {
-      return { hits: [], total: 0 };
-    }
-  })), signal);
+  // Three retrieval routes at once: the planned queries, the passage the
+  // planner named outright, and the same keywords restricted to Tanakh.
+  const [planned, searches, scoped] = await abortable(Promise.all([
+    plannedPassages(sefaria, plan.refs, { signal }),
+    Promise.all(queries.map(async (query) => {
+      try {
+        return await sefaria.search(query, { size: 10 });
+      } catch {
+        return { hits: [], total: 0 };
+      }
+    })),
+    scriptureScopedHits(sefaria, retrievalQuestion),
+  ]), signal);
 
-  const ranked = aggregate(searches);
+  // A planned range already contains any search hit inside it.
+  const spans = planned.map((p) => refSpan(p.ref)).filter(Boolean);
+  const ranked = aggregate(searches)
+    .filter((hit) => !spans.some((span) => coveredBy(hit.ref, span)));
+
+  // With a planned passage, only verses from its own chapter are useful: the
+  // rest of the narrative. A Tanakh match from another book (a calf offering in
+  // Leviticus for "golden calf") would be noise, and the model may invent a
+  // connection to it. Without a planned passage, scoped hits are the fallback.
+  const sameChapter = (hit) => {
+    const own = refSpan(hit.ref);
+    return Boolean(own && spans.some((span) => own.book === span.book && own.chapter === span.chapter));
+  };
+  const extras = scoped.filter((hit) => !spans.some((span) => coveredBy(hit.ref, span))
+    && (!planned.length || sameChapter(hit)));
+  extras.sort((a, b) => (b.score + b.hits * 2) - (a.score + a.hits * 2));
+  const scopedHits = extras.slice(0, planned.length ? 3 : 4);
+
+  const seenRefs = new Set();
+  const combined = [...planned, ...scopedHits, ...ranked].filter((hit) => {
+    if (seenRefs.has(hit.ref)) return false;
+    seenRefs.add(hit.ref);
+    return true;
+  });
+
   // Primary sources first, then commentary, then Jewish thought and Mussar —
   // with slots reserved for each tier so commentary is not crowded out.
-  const tiered = await abortable(orderByTier(sefaria, ranked), signal);
-  const shortlist = category ? ranked.slice(0, 24) : pickShortlist(tiered, 18);
+  let tiered = await abortable(orderByTier(sefaria, combined), signal);
+  // When the planner named the passage, a Tanakh verse from somewhere else is
+  // almost always a one-word coincidence (a calf offering in Leviticus for
+  // "golden calf"). Keep the planned chapter and non-Tanakh discussion, and
+  // drop the coincidences before the model has to judge them.
+  if (planned.length) {
+    tiered = tiered.filter((hit) => {
+      if (hit.planned || hit.scriptureScope || !hit.scripture) return true;
+      const own = refSpan(hit.ref);
+      return Boolean(own && spans.some((span) => own.book === span.book && own.chapter === span.chapter));
+    });
+  }
+  const shortlist = category ? combined.slice(0, 24) : pickShortlist(tiered, 18);
   let candidates = await abortable(loadCandidates(sefaria, shortlist), signal);
 
   if (category) {
@@ -440,7 +789,7 @@ async function ask({ question, category = null, limit = 4, sefaria, llm, signal 
   // Sefaria search is lexical and indexes the whole work, so a hit can land on a
   // passage that never mentions the query. Drop those when enough passages do
   // carry the question's own words, and otherwise leave the list alone.
-  const terms = questionTerms(q).filter((t) => t.length > 2);
+  const terms = questionTerms(retrievalQuestion).filter((t) => t.length > 2);
   const onTopic = candidates.filter((c) => overlapScore(c, terms) > 0);
   if (onTopic.length >= 3) candidates = onTopic;
 
@@ -467,23 +816,28 @@ async function ask({ question, category = null, limit = 4, sefaria, llm, signal 
   let confidence = 'medium';
   let caveats = '';
   let aiUsed = true;
+  let rankedTokens = null;
 
   try {
-    const rankedResult = await rankWithLLM(llm, q, candidates, limit, { signal });
+    const rankedResult = await rankWithLLM(llm, q, candidates, limit, {
+      signal, context: contextText, onDraft, onStatus,
+    });
+    if (rankedResult.considered) candidates = candidates.slice(0, rankedResult.considered);
+    rankedTokens = rankedResult.promptTokens || null;
     answer = rankedResult.answer;
     picks = rankedResult.picks;
     confidence = rankedResult.confidence;
     caveats = rankedResult.caveats;
     // An empty pick list with an answer is a considered "none of these fit",
     // not a failure; only a silent result falls back to raw relevance.
-    if (!picks.length && !rankedResult.answer) picks = heuristicRank(candidates, Math.min(limit, 3), q);
+    if (!picks.length && !rankedResult.answer) picks = heuristicRank(candidates, Math.min(limit, 3), retrievalQuestion);
   } catch (err) {
     // A person who pressed Stop does not want a degraded answer instead.
     if (err.code === 'CANCELLED' || (signal && signal.aborted)) throw cancelled();
     // The retrieval work is still useful without the model; degrade honestly.
     aiUsed = false;
     answer = 'The AI ranking step failed, so these are the highest-scoring passages from Sefaria search, unranked by the model.';
-    picks = heuristicRank(candidates, Math.min(limit, 3), q);
+    picks = heuristicRank(candidates, Math.min(limit, 3), retrievalQuestion);
     confidence = 'low';
     caveats = err.message;
   }
@@ -523,12 +877,13 @@ async function ask({ question, category = null, limit = 4, sefaria, llm, signal 
       elapsedMs: Date.now() - started,
       ai: aiUsed,
       model: aiUsed ? llm.config().model : null,
+      promptTokens: aiUsed ? rankedTokens : null,
     },
   };
 }
 
 /** Contextual gloss for a clicked word, grounded in the verse and lexicon. */
-async function gloss({ word, verseHe, verseEn, lexicon }, { llm }) {
+async function gloss({ word, verseHe, verseEn, lexicon }, { llm, signal }) {
   const lex = (lexicon || []).slice(0, 3).map((e) => {
     const senses = (e.senses || []).map((s) => s.text).join('; ');
     return `- ${e.lexicon}${e.morphology ? ` (${e.morphology})` : ''}: ${clip(senses, 320)}`;
@@ -541,7 +896,7 @@ async function gloss({ word, verseHe, verseEn, lexicon }, { llm }) {
         role: 'user',
         content: `Word as it appears: ${word}\nVerse (Hebrew): ${verseHe || '(not supplied)'}\nVerse (English): ${verseEn || '(not supplied)'}\n\nDictionary entries available:\n${lex || '(none)'}\n\nReturn JSON: {"gloss": "the word as used in THIS verse, 1-6 words", "root": "three-letter root if identifiable, else empty string", "binyan": "verb pattern if a verb, else empty string", "note": "at most one short clarifying sentence"} `,
       },
-    ], { maxTokens: 300, temperature: 0.1 });
+    ], { task: 'gloss', temperature: 0.1, signal });
     return {
       gloss: String(out.gloss || '').trim(),
       root: String(out.root || '').trim(),
@@ -549,9 +904,19 @@ async function gloss({ word, verseHe, verseEn, lexicon }, { llm }) {
       note: String(out.note || '').trim(),
     };
   } catch (err) {
+    if (err.code === 'CANCELLED') throw err;
     const first = (lexicon || [])[0];
     const fallback = first && first.senses && first.senses[0] ? first.senses[0].text : '';
-    return { gloss: fallback, root: '', binyan: '', note: err.code === 'NO_API_KEY' ? 'Add an AI key for a context-specific gloss.' : '' };
+    // A degraded answer is shown but never cached: a provider that was down a
+    // minute ago may be up again, and the lexicon's first sense is not the
+    // gloss this verse deserves.
+    return {
+      gloss: fallback,
+      root: '',
+      binyan: '',
+      note: err.code === 'NO_API_KEY' ? 'Add an AI key for a context-specific gloss.' : '',
+      degraded: true,
+    };
   }
 }
 
@@ -559,7 +924,7 @@ async function gloss({ word, verseHe, verseEn, lexicon }, { llm }) {
  * Produce an English rendering for segments that Sefaria publishes without one.
  * Batched and cached: a chapter is a handful of calls at most, and repeats are free.
  */
-async function translateSegments({ segments, ref = '' }, { llm, cache, maxPerBatch = 15, maxChars = 2800 } = {}) {
+async function translateSegments({ segments, ref = '' }, { llm, cache, signal, onProgress, maxPerBatch = 8, maxChars = 1600 } = {}) {
   const items = segments
     .map((text, index) => ({ text, index }))
     .filter(({ text }) => text && text.trim());
@@ -584,7 +949,9 @@ async function translateSegments({ segments, ref = '' }, { llm, cache, maxPerBat
     }
     if (batch.length) batches.push(batch);
 
-    for (const group of batches) {
+    for (const [batchIndex, group] of batches.entries()) {
+      if (signal && signal.aborted) throw cancelled();
+      if (onProgress) onProgress(batchIndex, batches.length);
       const numbered = group.map((item, i) => `[${i + 1}] ${item.text}`).join('\n\n');
       const out = await llm.json([
         { role: 'system', content: 'You translate Hebrew and Aramaic source texts into clear, faithful English for a study app. Preserve the register of the original, keep names consistent, and do not add commentary. If a word is uncertain, translate the plain sense.' },
@@ -592,7 +959,7 @@ async function translateSegments({ segments, ref = '' }, { llm, cache, maxPerBat
           role: 'user',
           content: `Reference: ${ref || 'unknown'}\nTranslate each numbered segment into English. Return JSON: {"translations": ["..."]} with exactly ${group.length} strings, in order. Do not merge or split segments.\n\n${numbered}`,
         },
-      ], { maxTokens: 1600, temperature: 0.1 });
+      ], { task: 'translate', maxTokens: 900, temperature: 0.1, signal });
 
       const list = Array.isArray(out.translations) ? out.translations : null;
       if (!list || list.length !== group.length) {
@@ -621,7 +988,7 @@ async function translateSelection({ text, contextHe, contextEn, target }, { llm 
       role: 'user',
       content: `Selection to translate:\n${clean}\n\nSurrounding verse (Hebrew): ${clip(contextHe || '', 700)}\nExisting translation: ${clip(contextEn || '', 700)}\n\nReturn JSON: {"translation": "faithful ${targetLanguage} translation of the selection only", "note": "one short note on an idiom or ambiguity, or an empty string"}`,
     },
-  ], { maxTokens: 500, temperature: 0.1 });
+  ], { task: 'translate.selection', temperature: 0.1 });
   return {
     translation: String(out.translation || '').trim(),
     note: String(out.note || '').trim(),
@@ -631,5 +998,6 @@ async function translateSelection({ text, contextHe, contextEn, target }, { llm 
 module.exports = {
   ask, gloss, translateSelection, translateSegments, planQueries, aggregate, CATEGORIES,
   tierFor, orderByTier, pickShortlist, workTitleOf, isPrimaryWork, TIER_LABEL,
-  fallbackQueries, questionTerms, distinctJustifications,
+  fallbackQueries, questionTerms, distinctJustifications, refSpan, coveredBy,
+  fitPrompt, partialJsonString, candidateBlock, SYSTEM, ANSWER_SCHEMA,
 };

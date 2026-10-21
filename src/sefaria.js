@@ -201,8 +201,10 @@ class Sefaria {
     if (!clean) throw new SefariaError('A reference is required');
     // Bump this whenever the shape derived from Sefaria's response changes:
     // shaped results are cached, so an old entry would otherwise keep serving
-    // stale language labels and an empty translation after an upgrade.
-    const key = `v4|${clean}|${version}|${includeHebrew}`;
+    // stale language labels and an empty translation after an upgrade. v5 decodes
+    // the thin spaces Sefaria wraps around the paseq; v4 entries still hold the
+    // literal entity.
+    const key = `v5|${clean}|${version}|${includeHebrew}`;
     return this.cache.wrap('text', key, async () => {
       const wanted = parseVersion(version);
       const requested = wanted.title ? `${wanted.language}|${wanted.title}` : wanted.language;
@@ -292,14 +294,27 @@ class Sefaria {
     });
   }
 
-  /** Elasticsearch-backed library search. Returns normalised hits. */
-  async search(query, { size = 12, start = 0, type = 'text', filters = null } = {}) {
+  /**
+   * Elasticsearch-backed library search. Returns normalised hits.
+   *
+   * `filters` is a list of slash-separated table-of-contents paths, e.g.
+   * `['Tanakh']` or `['Tanakh/Torah/Exodus']`; Sefaria applies each entry to the
+   * field named at the same position in `filterFields` (text search only has
+   * `path`). `field` and `slop` expose Sefaria's lemmatised Hebrew matching.
+   */
+  async search(query, {
+    size = 12, start = 0, type = 'text', filters = null, filterFields = null, field = null, slop = null,
+  } = {}) {
     const q = String(query || '').trim();
     if (!q) return { total: 0, hits: [] };
-    const key = `${q}|${size}|${start}|${type}|${filters ? JSON.stringify(filters) : ''}`;
+    const fields = filters ? (filterFields || filters.map(() => 'path')) : null;
+    const key = `v2|${q}|${size}|${start}|${type}|${filters ? JSON.stringify(filters) : ''}`
+      + `|${fields ? JSON.stringify(fields) : ''}|${field || ''}|${slop == null ? '' : slop}`;
     return this.cache.wrap('search', key, async () => {
       const body = { query: q, type, size, start };
-      if (filters) body.filters = filters;
+      if (filters) { body.filters = filters; body.filter_fields = fields; }
+      if (field) body.field = field;
+      if (slop != null) body.slop = slop;
       const data = await this.request(`${BASE}/api/search-wrapper`, { method: 'POST', body });
       const hits = (data.hits && data.hits.hits) || [];
       return {
@@ -327,7 +342,7 @@ class Sefaria {
     const clean = String(word || '').replace(/[\u0591-\u05C7]/g, '').trim() ||
       String(word || '').trim();
     if (!clean) return [];
-    return this.cache.wrap('words', clean, async () => {
+    return this.cache.wrap('words', `v2|${clean}`, async () => {
       for (const candidate of [String(word).trim(), clean]) {
         try {
           const data = await this.request(`${BASE}/api/words/${encodeURIComponent(candidate)}`);
@@ -486,6 +501,19 @@ class Sefaria {
         contents: n.contents ? shape(n.contents) : undefined,
       })) : []);
       return shape(data);
+    });
+  }
+
+  /**
+   * Sefaria's shape for a work: one node per addressable section, with the
+   * number of segments in each chapter. Complex works nest further nodes.
+   */
+  async shape(title) {
+    const clean = String(title || '').trim();
+    if (!clean) return [];
+    return this.cache.wrap('shape', `v1|${clean}`, async () => {
+      const data = await this.request(`${BASE}/api/shape/${encodeURIComponent(clean)}`);
+      return Array.isArray(data) ? data : [];
     });
   }
 

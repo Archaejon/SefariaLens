@@ -18,7 +18,7 @@ const ROOT = path.join(__dirname, '..', 'dist');
 const PORT = Number(process.argv[2] || process.env.SEFARIA_LENS_DL_PORT) || 4180;
 
 const FILES = [
-  { name: 'SefariaLens-1.0.0-portable.exe', label: 'Sefaria Lens 1.0.0 (Windows x64 portable)', note: 'Single file, no installer, no admin rights.' },
+  { name: 'SefariaLens-1.0.9-portable.exe', label: 'Sefaria Lens 1.0.9 (Windows x64 portable)', note: 'Single file, no installer, no admin rights.' },
   { name: 'SHA256SUMS.txt', label: 'SHA-256 checksum', note: 'Verify the download with sha256sum or CertUtil.' },
 ];
 
@@ -72,7 +72,7 @@ function page() {
   <p class="sub">Windows x64 · portable · built from the verified source tree</p>
   <ul>${rows}</ul>
   <p class="note">The executable is unsigned: if Windows SmartScreen appears, choose
-  “More info” → “Run anyway”. Verify with <code>certutil -hashfile SefariaLens-1.0.0-portable.exe SHA256</code>.</p>
+  “More info” → “Run anyway”. Verify with <code>certutil -hashfile SefariaLens-1.0.9-portable.exe SHA256</code>.</p>
 </main></body></html>`;
 }
 

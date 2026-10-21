@@ -7,6 +7,7 @@
 (function () {
   if (window.sefariaLens && typeof window.sefariaLens.rpc === 'function') {
     window.api = window.sefariaLens;
+    if (typeof window.api.onEvent !== 'function') window.api.onEvent = () => () => {};
     return;
   }
   window.api = {
@@ -32,5 +33,15 @@
       return json.data;
     },
     openExternal: (url) => window.open(url, '_blank', 'noopener'),
+    // Server-sent events over the harness: the same payloads the desktop app
+    // sends over IPC, so streaming works in the browser too.
+    onEvent: (cb) => {
+      if (typeof EventSource === 'undefined') return () => {};
+      const source = new EventSource('/events');
+      source.onmessage = (event) => {
+        try { cb(JSON.parse(event.data)); } catch { /* keep listening */ }
+      };
+      return () => source.close();
+    },
   };
 })();

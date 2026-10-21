@@ -2,9 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-  ask, aggregate, gloss, translateSelection, translateSegments,
+  ask, aggregate, gloss, translateSelection, translateSegments, planQueries,
   tierFor, orderByTier, pickShortlist, workTitleOf, isPrimaryWork,
-  fallbackQueries, distinctJustifications,
+  fallbackQueries, distinctJustifications, refSpan, coveredBy,
 } = require('../src/answer.js');
 
 const HITS = [
@@ -72,6 +72,35 @@ test('ask returns grounded sources with justifications', async () => {
   assert.match(result.sources[0].justification, /verse itself/);
   assert.strictEqual(result.confidence, 'high');
   assert.strictEqual(result.meta.ai, true);
+});
+
+test('a question about a selection carries the selection and its verse into the prompts', async () => {
+  let planPrompt = '';
+  let rankPrompt = '';
+  const llm = {
+    config: () => ({ model: 'mock' }),
+    json: async (messages) => {
+      const text = messages.map((m) => m.content).join('\n');
+      if (text.includes('"queries"')) {
+        planPrompt = text;
+        return { queries: ['love your neighbor'], concepts: [] };
+      }
+      rankPrompt = text;
+      return {
+        answer: 'The verse addresses the neighbour in Israelite law.',
+        sources: [{ index: 1, justification: 'It states the command.', relevance: 0.9 }],
+        confidence: 'medium',
+        caveats: '',
+      };
+    },
+  };
+  const context = 'Selected text: love your neighbor\nReference: Leviticus 19:18\nSurrounding verse (English): Love your neighbor as yourself.';
+  await ask({ question: 'Who is my neighbor here?', context, sefaria: fakeSefaria(), llm });
+
+  assert.match(planPrompt, /Leviticus 19:18/);
+  assert.match(rankPrompt, /selected text/i);
+  assert.match(rankPrompt, /Who is my neighbor here\?/);
+  assert.match(rankPrompt, /Love your neighbor as yourself/);
 });
 
 test('invalid source indexes are dropped, not trusted', async () => {
@@ -310,6 +339,178 @@ test('repeated model justifications are replaced with passage-specific notes', (
   assert.notStrictEqual(out[0].justification, out[1].justification);
   assert.match(out[1].justification, /matched/);
   assert.match(out[1].justification, /Leviticus/);
+});
+
+test('the planner asks for a canonical ref as well as queries', async () => {
+  const llm = {
+    json: async (messages) => {
+      assert.match(messages[1].content, /"refs"/);
+      return { queries: ['golden calf'], refs: ['Exodus 32:1-6'], concepts: [] };
+    },
+  };
+  const plan = await planQueries(llm, 'Where does the Torah mention the Golden Calf?');
+  assert.deepStrictEqual(plan.refs, ['Exodus 32:1-6']);
+  assert.deepStrictEqual(plan.queries, ['golden calf']);
+});
+
+test('planner refs are normalised from suffixes and objects', async () => {
+  const llm = {
+    json: async () => ({
+      queries: [],
+      refs: [
+        'Exodus 32:1-6 (Chumash)',
+        { book: 'Exodus', chapter: 32 },
+        { book: 'Deuteronomy', start: 9, end: 10 },
+        'not a ref',
+      ],
+    }),
+  };
+  const plan = await planQueries(llm, 'q');
+  assert.deepStrictEqual(plan.refs, ['Exodus 32:1-6', 'Exodus 32', 'Deuteronomy 9']);
+});
+
+test('a planned Torah passage is fetched from Sefaria and ranked first', async () => {
+  const calls = [];
+  const exodus = {
+    ref: 'Exodus 32:1-6',
+    heRef: 'שמות ל״ב א׳-ו׳',
+    title: 'Exodus',
+    categories: ['Tanakh', 'Torah'],
+    primaryCategory: 'Tanakh',
+    he: ['וַיַּרְא הָעָם כִּי בֹשֵׁשׁ מֹשֶׁה'],
+    en: ['When the people saw that Moses was late, they made a calf.'],
+    heVersion: { title: 'Miqra according to the Masorah', license: 'CC-BY-SA' },
+    enVersion: { title: 'JPS', license: 'CC-BY-NC' },
+  };
+  const talmud = {
+    ref: 'Talmud, Avodah Zarah 43b',
+    heRef: 'עבודה זרה מג:' ,
+    title: 'Avodah Zarah',
+    categories: ['Talmud', 'Bavli'],
+    primaryCategory: 'Talmud',
+    he: ['אָמַר רַבִּי יוֹחָנָן'],
+    en: ['Rabbi Yochanan discussed the calf.'],
+    heVersion: { title: 'Vilna', license: 'Public Domain' },
+    enVersion: { title: 'Sefaria', license: 'CC0' },
+  };
+  const sefaria = {
+    search: async (query, opts = {}) => {
+      calls.push({ query, opts });
+      if (opts.filters) return { total: 1, hits: [{ ref: 'Exodus 32:4', score: 18, hits: 1 }] };
+      return {
+        total: 2,
+        hits: [
+          { ref: 'Talmud, Avodah Zarah 43b', score: 32, hits: 1 },
+          { ref: 'Exodus 32:4', score: 18, hits: 1 },
+        ],
+      };
+    },
+    text: async (ref) => {
+      if (ref === 'Exodus 32:1-6') return exodus;
+      if (ref === 'Exodus 32:4') return { ...exodus, ref, he: ['עֵגֶל מַסֵּכָה'], en: ['a molten calf'] };
+      if (ref === 'Talmud, Avodah Zarah 43b') return talmud;
+      throw new Error(`no such ref: ${ref}`);
+    },
+    categoryMap: async () => ({
+      Exodus: ['Tanakh', 'Torah'],
+      'Avodah Zarah': ['Talmud', 'Bavli'],
+      'Talmud, Avodah Zarah': ['Talmud', 'Bavli'],
+    }),
+  };
+  const llm = {
+    config: () => ({ model: 'mock' }),
+    json: async (messages) => {
+      const text = messages.map((m) => m.content).join('\n');
+      if (text.includes('"queries"')) {
+        return { queries: ['golden calf'], refs: ['Exodus 32:1-6'], concepts: [] };
+      }
+      return { answer: 'Exodus 32 narrates it.', sources: [{ index: 1, justification: 'The narrative itself.', relevance: 0.95 }], confidence: 'high' };
+    },
+  };
+
+  const result = await ask({ question: 'Where does the Torah mention the Golden Calf?', sefaria, llm });
+
+  assert.strictEqual(result.sources[0].ref, 'Exodus 32:1-6');
+  assert.strictEqual(result.sources[0].tier, 'primary');
+  // The verse inside the planned range is not offered a second time.
+  assert.strictEqual(result.sources.filter((s) => s.ref === 'Exodus 32:4').length, 0);
+  assert.ok(calls.some((c) => c.query.toLowerCase() === 'calf' && c.opts.filters && c.opts.filters[0] === 'Tanakh'),
+    `expected a Tanakh-scoped keyword search, got: ${JSON.stringify(calls.map((c) => c.query))}`);
+});
+
+test('a planned range that starts mid-chapter also offers the chapter opening', async () => {
+  const passage = (ref, en) => ({
+    ref,
+    heRef: ref,
+    title: 'Exodus',
+    categories: ['Tanakh', 'Torah'],
+    primaryCategory: 'Tanakh',
+    he: ['וַיְדַבֵּר'],
+    en: [en],
+    heVersion: { title: 'Miqra', license: 'CC-BY-SA' },
+    enVersion: { title: 'JPS', license: 'CC-BY-NC' },
+  });
+  const sefaria = {
+    search: async () => ({ total: 0, hits: [] }),
+    text: async (ref) => {
+      if (ref === 'Exodus 32:7-14') return passage(ref, 'God spoke to Moses about the calf.');
+      if (ref === 'Exodus 32:1-6') return passage(ref, 'The people made a calf.');
+      throw new Error(`no such ref: ${ref}`);
+    },
+  };
+  const llm = {
+    config: () => ({ model: 'mock' }),
+    json: async (messages) => {
+      const text = messages.map((m) => m.content).join('\n');
+      if (text.includes('"queries"')) return { queries: ['golden calf'], refs: ['Exodus 32:7-14'], concepts: [] };
+      return { answer: 'x', sources: [{ index: 2, justification: 'The narrative itself.', relevance: 0.9 }], confidence: 'high' };
+    },
+  };
+  const result = await ask({ question: 'Where does the Torah mention the Golden Calf?', sefaria, llm });
+  assert.strictEqual(result.sources[0].ref, 'Exodus 32:1-6');
+});
+
+test('an invented planned ref is skipped instead of breaking the answer', async () => {
+  const sefaria = fakeSefaria({
+    'Exodus 99:1-6': null,
+  });
+  const base = sefaria.text;
+  sefaria.text = async (ref) => {
+    if (ref === 'Exodus 99:1-6') throw new Error('no such passage');
+    return base(ref);
+  };
+  const llm = {
+    config: () => ({ model: 'mock' }),
+    json: async (messages) => {
+      const text = messages.map((m) => m.content).join('\n');
+      if (text.includes('"queries"')) return { queries: ['love your neighbor'], refs: ['Exodus 99:1-6'], concepts: [] };
+      return { answer: 'x', sources: [{ index: 1, justification: 'y', relevance: 1 }], confidence: 'low' };
+    },
+  };
+  const result = await ask({ question: 'What does the Torah say about love?', sefaria, llm });
+  assert.ok(result.sources.length >= 1);
+  assert.ok(!result.sources.some((s) => s.ref === 'Exodus 99:1-6'));
+});
+
+test('a Tanakh-scoped verse is ordered before a higher-scoring Talmud passage', async () => {
+  const tiered = await orderByTier({
+    categoryMap: async () => ({
+      Exodus: ['Tanakh', 'Torah'],
+      'Avodah Zarah': ['Talmud', 'Bavli'],
+    }),
+  }, [
+    { ref: 'Talmud, Avodah Zarah 43b', score: 40, hits: 2 },
+    { ref: 'Exodus 32:1-6', score: 15, hits: 1, scriptureScope: true },
+  ]);
+  assert.strictEqual(tiered[0].ref, 'Exodus 32:1-6');
+});
+
+test('a planned range covers the search hits inside it', () => {
+  const span = refSpan('Exodus 32:1-6');
+  assert.deepStrictEqual(span, { book: 'exodus', chapter: 32, start: 1, end: 6 });
+  assert.strictEqual(coveredBy('Exodus 32:4', span), true);
+  assert.strictEqual(coveredBy('Exodus 32:19', span), false);
+  assert.strictEqual(coveredBy('Exodus 33:1', span), false);
 });
 
 test('an English selection is translated back into Hebrew', async () => {

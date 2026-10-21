@@ -58,6 +58,15 @@
           <button type="submit" class="primary" id="ask-btn">Ask</button>
         </form>
 
+        <div id="ask-context" class="ask-context hidden">
+          <div class="ask-context-head">
+            <span>Asking about the selected text</span>
+            <button type="button" class="ghost small" id="ask-context-clear">Clear</button>
+          </div>
+          <p id="ask-context-text"></p>
+          <div id="ask-context-meta" class="ask-context-meta"></div>
+        </div>
+
         <div class="chips" id="category-chips"></div>
         <div id="ask-output" class="ask-output"></div>
       </section>
@@ -80,9 +89,31 @@
             <button data-style="mizrahi">Mizrahi</button>
             <button data-style="modern" class="is-active">Modern</button>
           </div>
+          <select id="style-more" class="style-more" aria-label="More transliteration traditions">
+            <option value="">More…</option>
+            <option value="yemeni">Yemeni</option>
+            <option value="kavkazi">Kavkazi</option>
+            <option value="ancient">Ancient</option>
+            <option value="ancient-hard">Ancient (hard)</option>
+          </select>
+          <label class="switch"><input type="checkbox" id="tgl-hebrew" checked><span>Hebrew</span></label>
           <label class="switch"><input type="checkbox" id="tgl-translit" checked><span>Translit</span></label>
           <label class="switch"><input type="checkbox" id="tgl-english" checked><span>Translation</span></label>
           <label class="switch"><input type="checkbox" id="tgl-commentaries" checked><span>Commentaries</span></label>
+          <label class="version-wrap" title="How much text to show at once">
+            <span class="version-label">Text</span>
+            <select id="reader-page-size">
+              <option value="0">All</option>
+              <option value="10">10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <label class="version-wrap hidden" id="chapter-wrap" title="Jump to another chapter of this work">
+            <span class="version-label" id="chapter-label">Chapter</span>
+            <select id="reader-chapter" aria-label="Jump to another chapter"></select>
+          </label>
           <label class="version-wrap hidden" id="version-wrap">
             <span class="version-label">Translation</span>
             <select id="reader-version"></select>
@@ -91,12 +122,13 @@
             <button id="font-down" class="icon-btn" title="Smaller text">A−</button>
             <button id="font-up" class="icon-btn" title="Larger text">A+</button>
           </div>
-          <span class="hint" id="reader-hint">Click any word for its dictionary entry and all three transliterations.</span>
+          <span class="hint" id="reader-hint">Click any word for its dictionary entry and its transliteration in every tradition.</span>
         </div>
 
         <div id="reader-meta" class="reader-meta"></div>
         <div id="reader-commentaries" class="reader-commentaries hidden"></div>
         <div id="reader-text" class="reader-text"></div>
+        <div id="reader-more" class="reader-more hidden"></div>
         <div id="reader-foot" class="reader-foot"></div>
       </section>
 
@@ -104,14 +136,14 @@
       <section id="view-library" class="view hidden">
         <header class="page-head">
           <h1>Library</h1>
-          <p class="sub">Browse the Sefaria library by category, then open any work in the reader. Everything Sefaria publishes is listed here.</p>
+          <p class="sub">Walk down the shelf from tradition to category to work, then pick a chapter. Everything Sefaria publishes is listed here.</p>
         </header>
         <div class="lib-toolbar">
           <input id="lib-filter" type="text" autocomplete="off" spellcheck="false" placeholder="Filter works — Berakhot, Mishnah, Rashi, Genesis…">
           <span id="lib-count" class="muted small"></span>
         </div>
         <div id="lib-breadcrumb" class="lib-trail hidden"></div>
-        <div id="lib-tree" class="lib-tree"></div>
+        <div id="lib-shelves" class="lib-shelves"></div>
       </section>
 
       <!-- SETTINGS ------------------------------------------------------- -->
@@ -150,6 +182,38 @@
         </section>
 
         <section class="card settings-card">
+          <h2>Local model resources</h2>
+          <p class="muted small">A local model is loaded on demand and held for a while after the last request. These controls decide how long it stays and how much context it reserves.</p>
+          <div class="form-grid">
+            <label>Keep in memory
+              <select id="set-keepalive">
+                <option value="0">Unload after each request</option>
+                <option value="5m">5 minutes</option>
+                <option value="15m">15 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="-1">Until I unload it</option>
+              </select>
+            </label>
+            <label>Context window
+              <select id="set-numctx">
+                <option value="2048">2048 tokens (smallest)</option>
+                <option value="4096">4096 tokens</option>
+                <option value="8192">8192 tokens</option>
+              </select>
+            </label>
+            <label class="check span2">
+              <input type="checkbox" id="set-autotranslate">
+              <span>Translate untranslated passages with AI as soon as they open (costs a minute of local inference per passage)</span>
+            </label>
+          </div>
+          <p class="muted small" id="set-resource-status"></p>
+          <div class="row gap">
+            <button id="set-free" class="ghost">Free memory now</button>
+            <button id="set-ps" class="ghost">What is loaded?</button>
+          </div>
+        </section>
+
+        <section class="card settings-card">
           <h2>Reading</h2>
           <div class="form-grid">
             <label>Default transliteration
@@ -157,6 +221,10 @@
                 <option value="modern">Modern Israeli</option>
                 <option value="ashkenazi">Ashkenazi</option>
                 <option value="mizrahi">Mizrahi</option>
+                <option value="yemeni">Yemeni</option>
+                <option value="kavkazi">Kavkazi</option>
+                <option value="ancient">Ancient (begedkefet)</option>
+                <option value="ancient-hard">Ancient (hard)</option>
               </select>
             </label>
             <label>Text size
@@ -164,7 +232,20 @@
             </label>
             <label class="check span2">
               <input type="checkbox" id="set-diacritics">
-              <span>Use scholarly diacritics in Mizrahi transliteration (ḥ ʿ ṣ ṭ q, and rafe gimel/dalet/tav ḡ ḏ ṯ)</span>
+              <span>Use scholarly diacritics (ḥ ʿ ṣ ṭ q, rafe gimel/dalet/tav ḡ ḏ ṯ, ö/ä in Yemeni and Kavkazi, and the Ancient macrons and ś)</span>
+            </label>
+            <label>Text shown at once
+              <select id="set-page-size">
+                <option value="0">Whole section</option>
+                <option value="10">10 segments</option>
+                <option value="25">25 segments</option>
+                <option value="50">50 segments</option>
+                <option value="100">100 segments</option>
+              </select>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="set-show-hebrew">
+              <span>Show Hebrew text by default</span>
             </label>
             <label class="check">
               <input type="checkbox" id="set-show-translit">
@@ -182,7 +263,7 @@
           <h2>About</h2>
           <p>Sefaria Lens is an independent study tool. Texts, translations, links, and lexicon entries come from the
             <a href="https://www.sefaria.org" data-external>Sefaria API</a> and remain under the license of each version.</p>
-          <p>Transliteration is generated locally by a rules engine modelling three reading traditions. It is a study aid,
+          <p>Transliteration is generated locally by a rules engine modelling seven reading traditions — Modern Israeli, Ashkenazi and Mizrahi on the bar, with Yemeni, Kavkazi and the two Ancient schemes in the More menu. It is a study aid,
             not an authoritative vocalization: stress and a minority of qamatz-qatan and shva cases are approximate.
             Where a source marks qamatz qatan, the engine follows the source.</p>
           <p class="muted small" id="app-info"></p>
@@ -200,7 +281,7 @@
       </div>
       <div id="ctx-body" class="ctx-body">
         <div class="ctx-empty">
-          <p>Click a Hebrew word in the reader to see its dictionary entry, root, and transliteration in all three traditions.</p>
+          <p>Click a Hebrew word in the reader to see its dictionary entry, root, and transliteration in every tradition.</p>
           <p>Select a phrase to translate it in context.</p>
         </div>
       </div>
@@ -211,6 +292,7 @@
     <button data-sel="translate">Translate</button>
     <button data-sel="translit">Transliterate</button>
     <button data-sel="search">Search</button>
+    <button data-sel="ask">Ask</button>
   </div>
 
   <div id="setup-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
@@ -246,6 +328,7 @@
     </div>
   </div>
 
+  <div id="ai-status" class="ai-status hidden" role="status"></div>
   <div id="toast" class="toast hidden" role="status"></div>
 
   <script src="bridge.js"></script>

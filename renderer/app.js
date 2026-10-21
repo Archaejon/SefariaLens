@@ -13,19 +13,31 @@ const S = {
   diacritics: true,
   showTranslit: true,
   showEnglish: true,
+  showHebrew: true,
   showCommentaries: true,
   fontSize: 20,
+  pageSize: 0,
+  readerShown: 0,
   category: '',
   askResult: null,
+  askContext: null,
   reader: null,
   busy: false,
   library: null,
-  libOpen: new Set(),
   libFilter: '',
   libMatches: [],
   libPath: [],
   libScroll: 0,
   libReturnPath: null,
+  // Chapters of the work selected on the Library shelf, and of the passage
+  // open in the reader (keyed by title, so switching back is instant).
+  libChapters: null,
+  libChaptersFor: '',
+  libChapterError: '',
+  libSection: 0,
+  chaptersCache: new Map(),
+  shapeSeq: 0,
+  readerChapterRef: '',
   // Per-verse commentary state: fetched choosers, the open one, and picks.
   verseComm: {},
   verseSel: {},
@@ -33,6 +45,13 @@ const S = {
   vcLoading: '',
   vcError: '',
   vcMore: new Set(),
+  // The request whose progress events the interface should honour, and the
+  // draft answer as it streams in. Any other request id is stale and ignored.
+  askRequestId: '',
+  askDraft: '',
+  translateBusy: false,
+  translateReq: '',
+  autoTranslate: false,
 };
 
 const esc = (s) => String(s == null ? '' : s)
@@ -40,6 +59,11 @@ const esc = (s) => String(s == null ? '' : s)
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 const enc = encodeURIComponent;
+
+// The four letters with their pointing stripped, so a pointed or unpointed form
+// both count when the reader is told which reading the transliteration used.
+const hasDivineName = (he) => Boolean(he)
+  && String(he).replace(/[\u0591-\u05C7]/g, '').includes('יהוה');
 
 /* ------------------------------------------------------------------ utils */
 
@@ -50,6 +74,57 @@ function toast(message, kind = '') {
   el.className = `toast ${kind}`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), 3600);
+}
+
+/* ------------------------------------------------------------- AI status */
+
+let aiStatusTimer = null;
+
+/**
+ * One unobtrusive line for whatever the model is doing. It never blocks
+ * anything and never needs a second one: a new message replaces the last.
+ */
+function setAiStatus(message, kind = '') {
+  const el = $('#ai-status');
+  if (!el) return;
+  clearTimeout(aiStatusTimer);
+  if (!message) { el.classList.add('hidden'); return; }
+  el.textContent = message;
+  el.className = `ai-status ${kind}`;
+  el.classList.remove('hidden');
+  if (kind !== 'busy') aiStatusTimer = setTimeout(() => el.classList.add('hidden'), 4500);
+}
+
+/** Progress events from a running generation, routed by request id. */
+function handleAiEvent(event) {
+  if (!event) return;
+  const mine = event.requestId && S.askRequestId && event.requestId === S.askRequestId;
+  if (event.type === 'ask' && event.requestId && !mine) return;
+
+  if (event.phase === 'draft') {
+    S.askDraft = String(event.text || '');
+    const draft = $('#ask-draft');
+    if (draft) draft.textContent = S.askDraft;
+    return;
+  }
+  if (event.type === 'translate') {
+    if (event.phase === 'generating') {
+      setAiStatus(`Translating…${event.batch != null ? ` batch ${event.batch + 1} of ${event.total}` : ''}`, 'busy');
+    } else if (event.phase === 'done') {
+      setAiStatus('Translation ready', 'ok');
+    }
+    return;
+  }
+  if (event.phase === 'queued') setAiStatus('Waiting for the model to finish…', 'busy');
+  else if (event.phase === 'starting') setAiStatus(`Connecting to ${event.model || 'the model'}…`, 'busy');
+  else if (event.phase === 'preparing') setAiStatus(`Preparing ${event.model || 'the model'} — loading it into memory`, 'busy');
+  else if (event.phase === 'generating') setAiStatus('Generating…', 'busy');
+  else if (event.phase === 'done') {
+    // The planning step finishing is not the end of the answer; the run itself
+    // reports completion. Just stop claiming the model is working.
+    if (event.timings) S.lastTimings = event.timings;
+    setAiStatus('');
+  } else if (event.phase === 'error') setAiStatus(event.message || 'The model stopped.', 'err');
 }
 
 function setView(view) {
@@ -72,14 +147,31 @@ function setBusy(btn, busy, label) {
   if (label) btn.textContent = busy ? 'Working…' : label;
 }
 
+const CORE_STYLES = ['modern', 'ashkenazi', 'mizrahi'];
+const STYLE_LABELS = {
+  modern: 'Modern', ashkenazi: 'Ashkenazi', mizrahi: 'Mizrahi', yemeni: 'Yemeni', kavkazi: 'Kavkazi',
+  ancient: 'Ancient', 'ancient-hard': 'Ancient (hard)',
+};
+
 function applyReadingSettings() {
   document.documentElement.style.setProperty('--reader-size', `${S.fontSize}px`);
   $$('#style-seg button').forEach((b) => b.classList.toggle('is-active', b.dataset.style === S.style));
+  const more = $('#style-more');
+  if (more) {
+    const extra = !CORE_STYLES.includes(S.style);
+    more.value = extra ? S.style : '';
+    more.classList.toggle('has-value', extra);
+  }
   $('#tgl-translit').checked = S.showTranslit;
   $('#tgl-english').checked = S.showEnglish;
+  $('#tgl-hebrew').checked = S.showHebrew;
   $('#tgl-commentaries').checked = S.showCommentaries;
   $('#set-show-translit').checked = S.showTranslit;
   $('#set-show-english').checked = S.showEnglish;
+  $('#set-show-hebrew').checked = S.showHebrew;
+  const page = String(S.pageSize || 0);
+  if ($('#reader-page-size')) $('#reader-page-size').value = page;
+  if ($('#set-page-size')) $('#set-page-size').value = page;
 }
 
 /* ------------------------------------------------------------------ panel */
@@ -132,6 +224,7 @@ async function runAsk(question) {
   const q = String(question || '').trim();
   if (!q || S.busy) return;
   $('#ask-input').value = q;
+  const context = askContextText(S.askContext);
   S.busy = true;
   setBusy($('#ask-btn'), true, 'Ask');
 
@@ -147,6 +240,8 @@ async function runAsk(question) {
   const requestId = (window.crypto && crypto.randomUUID)
     ? crypto.randomUUID()
     : `ask-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  S.askRequestId = requestId;
+  S.askDraft = '';
   let stopped = false;
   $('#ask-output').dataset.filled = '0';
   $('#ask-output').innerHTML = `
@@ -155,7 +250,8 @@ async function runAsk(question) {
       <div class="loading-copy"><div id="stage">${stages[0]}</div>
       <div class="muted small" id="elapsed">0s</div></div>
       <button type="button" class="ghost small" id="ask-cancel">Stop</button>
-    </div>`;
+    </div>
+    <div id="ask-draft" class="answer-draft"></div>`;
   const cancelBtn = $('#ask-cancel');
   if (cancelBtn) {
     cancelBtn.addEventListener('click', async () => {
@@ -183,17 +279,58 @@ async function runAsk(question) {
   }, 2400);
 
   try {
-    const result = await api.rpc('ask', { question: q, category: S.category || null, limit: 4, requestId });
+    const result = await api.rpc('ask', { question: q, category: S.category || null, limit: 4, requestId, context });
     S.askResult = result;
     renderAnswer(result);
+    const t = S.lastTimings || {};
+    setAiStatus(t.tokensPerSecond ? `Answered · ${t.tokensPerSecond} tok/s` : '', 'ok');
+    S.lastTimings = null;
   } catch (err) {
     if (stopped || err.code === 'CANCELLED') renderAskCancelled();
     else renderAskError(err);
+    setAiStatus('');
   } finally {
     clearInterval(timer);
     S.busy = false;
+    S.askRequestId = '';
+    S.askDraft = '';
     setBusy($('#ask-btn'), false, 'Ask');
   }
+}
+
+/**
+ * What the model receives alongside the question. The selected words alone can
+ * be ambiguous (a pronoun, half a clause); the verse and its reference let the
+ * retrieval and ranking steps read the selection in place.
+ */
+function askContextText(context) {
+  if (!context || !context.text) return null;
+  const parts = [`Selected text: ${context.text}`];
+  if (context.ref) parts.push(`Reference: ${context.ref}`);
+  if (context.contextHe && context.contextHe !== context.text) {
+    parts.push(`Surrounding verse (Hebrew/Aramaic): ${context.contextHe}`);
+  }
+  if (context.contextEn && context.contextEn !== context.text) {
+    parts.push(`Surrounding verse (English): ${context.contextEn}`);
+  }
+  return parts.join('\n');
+}
+
+function renderAskContext() {
+  const box = $('#ask-context');
+  if (!box) return;
+  if (!S.askContext || !S.askContext.text) {
+    box.classList.add('hidden');
+    $('#ask-context-text').textContent = '';
+    if ($('#ask-context-meta')) $('#ask-context-meta').textContent = '';
+    $('#ask-input').placeholder = 'How do the sources understand “love your neighbor as yourself”?';
+    return;
+  }
+  box.classList.remove('hidden');
+  $('#ask-context-text').textContent = S.askContext.text;
+  const words = S.askContext.text.trim().split(/\s+/).filter(Boolean).length;
+  const meta = [S.askContext.ref, `${words} word${words === 1 ? '' : 's'} selected`].filter(Boolean);
+  if ($('#ask-context-meta')) $('#ask-context-meta').textContent = meta.join(' · ');
 }
 
 function renderAskError(err) {
@@ -265,7 +402,7 @@ function renderAnswer(result) {
             <button class="source-ref" data-open-ref="${esc(src.ref)}">${esc(src.ref)}</button>
             <div class="source-sub">
               ${src.tier ? `<span class="tier-badge tier-${esc(src.tier)}">${esc(src.tierLabel || '')}</span>` : ''}
-              ${src.heRef ? `<span dir="rtl" style="font-family:var(--hebrew-font)">${esc(src.heRef)}</span>` : ''}
+              ${S.showHebrew && src.heRef ? `<span dir="rtl" style="font-family:var(--hebrew-font)">${esc(src.heRef)}</span>` : ''}
               ${(src.categories || []).length ? `<span>·</span><span>${esc((src.categories || []).join(' › '))}</span>` : ''}
             </div>
           </div>
@@ -276,7 +413,7 @@ function renderAnswer(result) {
             </div>` : ''}
         </header>
         <div class="source-body">
-          ${src.he ? `<p class="he-block" data-he="${enc(src.he)}">${esc(src.he)}</p>` : ''}
+          ${S.showHebrew && src.he ? `<p class="he-block" data-he="${enc(src.he)}">${esc(src.he)}</p>` : ''}
           ${S.showTranslit && translit ? `<p class="translit-block">${esc(translit)}</p>` : ''}
           ${S.showEnglish && src.machineTranslation ? '<span class="mtag">AI translation</span>' : ''}
           ${S.showEnglish
@@ -321,6 +458,55 @@ function renderVersionPicker(data) {
   }).join('');
 }
 
+/** The chapter unit a loaded passage belongs to; longest ref wins. */
+function chapterMatchFor(book, ref) {
+  const clean = String(ref || '').trim();
+  let best = null;
+  for (const section of book.sections || []) {
+    for (const unit of section.units || []) {
+      if (clean !== unit.ref && !clean.startsWith(`${unit.ref} `) && !clean.startsWith(`${unit.ref}:`)) continue;
+      if (!best || unit.ref.length > best.ref.length) best = unit;
+    }
+  }
+  return best;
+}
+
+/**
+ * The reader's jump control: every chapter of the open work, grouped by section
+ * for complex works (Zohar's parashot, a siddur's services).
+ */
+async function renderChapterPicker(data) {
+  const wrap = $('#chapter-wrap');
+  const select = $('#reader-chapter');
+  if (!wrap || !select) return;
+  const title = (data && data.title) || '';
+  if (!title) { wrap.classList.add('hidden'); return; }
+  let book = S.chaptersCache.get(title);
+  if (!book) {
+    const token = ++S.shapeSeq;
+    wrap.classList.add('hidden');
+    try { book = await api.rpc('library.chapters', { title }); } catch { return; }
+    if (token !== S.shapeSeq) return;
+    S.chaptersCache.set(title, book);
+  }
+  if (S.reader !== data) return;
+  const sections = book.sections || [];
+  const units = sections.reduce((all, s) => all.concat(s.units || []), []);
+  if (units.length < 2) { wrap.classList.add('hidden'); return; }
+  const match = chapterMatchFor(book, data.ref);
+  S.readerChapterRef = match ? match.ref : '';
+  const label = $('#chapter-label');
+  if (label) label.textContent = book.unitLabel === 'daf' ? 'Daf' : 'Chapter';
+  // A grouped option reads "2" inside its optgroup, but a closed select shows
+  // only that label — so complex works carry the section name in the option.
+  const option = (u, section) => `<option value="${esc(u.ref)}">${esc(sections.length > 1 && section ? `${section.label} ${u.label}` : u.label)}</option>`;
+  select.innerHTML = sections.length > 1
+    ? sections.map((s) => `<optgroup label="${esc(s.label)}${s.heTitle ? ` · ${esc(s.heTitle)}` : ''}">${(s.units || []).map((u) => option(u, s)).join('')}</optgroup>`).join('')
+    : units.map((u) => option(u)).join('');
+  if (match) select.value = match.ref;
+  wrap.classList.remove('hidden');
+}
+
 function renderReaderMeta(data) {
   const cats = data.categories || [];
   // The category path is the way back into the library: Genesis sits under
@@ -335,8 +521,10 @@ function renderReaderMeta(data) {
         ${crumbs ? `<span class="crumb-sep">›</span>${crumbs}` : ''}
       </div>
       <div>
-        <span class="ref-title">${esc(data.title || data.ref)}</span>
-        <span class="he-title">${esc(data.heTitle || '')}</span>
+        ${data.title
+          ? `<button class="ref-title ref-title-btn" data-lib-work-at="${esc(data.title)}" title="Choose a chapter in the library">${esc(data.title)}</button>`
+          : `<span class="ref-title">${esc(data.ref)}</span>`}
+        ${S.showHebrew ? `<span class="he-title">${esc(data.heTitle || '')}</span>` : ''}
       </div>
       <div class="crumbs">${data.heVersion ? esc(data.heVersion.title) : ''}${data.enVersion && data.enVersion.language !== 'english' ? ` · <span class="pill">${esc(data.enVersion.languageLabel)}</span>` : ''}${data.machineTranslation ? ' · <span class="pill">AI English translation</span>' : ''}</div>
     </div>`;
@@ -504,7 +692,7 @@ function selectedCommentaryHtml(index) {
   if (!sel || !Array.isArray(sel.segments) || !sel.segments.length) return '';
   const where = index === -1 ? 'the passage' : `verse ${index + 1}`;
   const blocks = sel.segments.map((seg) => `
-    ${seg.he ? `<p class="sc-he">${esc(seg.he)}</p>` : ''}
+    ${S.showHebrew && seg.he ? `<p class="sc-he">${esc(seg.he)}</p>` : ''}
     ${S.showEnglish && seg.en ? `<p class="sc-en">${esc(seg.en)}</p>` : ''}`).join('');
   return `<div class="seg-commentary">
     <div class="sc-head">${esc(sel.title || sel.work)} <span class="sc-verse">· ${esc(where)}</span>
@@ -584,31 +772,60 @@ function renderReaderBody() {
   const data = S.reader;
   if (!data) return;
   const rows = data.rows || [];
+  const shown = S.pageSize > 0
+    ? Math.min(Math.max(S.readerShown || S.pageSize, S.pageSize), rows.length)
+    : rows.length;
+  const visible = rows.slice(0, shown);
+  const remaining = rows.length - visible.length;
   // Only verse-addressable primary texts get a per-verse chooser; a daf or a
   // commentary page uses the passage-level list instead.
   const perVerse = S.showCommentaries && isPrimarySource(data)
     && Array.isArray(data.segRefs) && data.segRefs.length > 0;
   const enDir = data.enVersion && data.enVersion.direction === 'rtl' ? 'rtl' : 'ltr';
-  $('#reader-text').innerHTML = rows.map((row, i) => {
+  $('#reader-text').innerHTML = visible.map((row, i) => {
     const translit = row.translit ? (row.translit[S.style] || '') : '';
+    const hasHe = Boolean(S.showHebrew && row.he);
+    const hasTranslit = Boolean(S.showTranslit && translit);
+    const hasEn = Boolean(S.showEnglish && row.en);
+    const original = hasHe || hasTranslit;
+    // Original on the right, translation on the left, verse by verse. With
+    // Hebrew off the transliteration is a reading aid, not a second column: the
+    // English takes the full width and the translit sits above it.
+    const parallel = hasHe && hasEn;
     return `
-      <div class="segment" data-seg="${i}">
+      <div class="segment${parallel ? ' is-parallel' : ''}" data-seg="${i}">
         <div class="seg-num">${i + 1}</div>
-        <div>
-          ${row.he ? `<p class="he-text">${hebrewWordsHtml(row.he, i)}</p>` : ''}
-          ${S.showTranslit && translit ? `<p class="seg-translit">${esc(translit)}</p>` : ''}
-          ${S.showEnglish && row.en ? `<p class="seg-en" dir="${enDir}">${esc(row.en)}</p>` : ''}
-          ${perVerse ? commentaryControlsHtml(i) : ''}
-          ${perVerse ? selectedCommentaryHtml(i) : ''}
+        <div class="seg-body">
+          ${original ? `<div class="seg-col seg-col-orig">
+            ${hasHe ? `<p class="he-text">${hebrewWordsHtml(row.he, i)}</p>` : ''}
+            ${hasTranslit ? `<p class="seg-translit">${esc(translit)}</p>` : ''}
+          </div>` : ''}
+          ${hasEn ? `<div class="seg-col seg-col-en"><p class="seg-en" dir="${enDir}">${esc(row.en)}</p></div>` : ''}
+          ${perVerse ? `<div class="seg-extra">${commentaryControlsHtml(i)}${selectedCommentaryHtml(i)}</div>` : ''}
         </div>
       </div>`;
   }).join('');
+
+  const more = $('#reader-more');
+  if (more) {
+    if (remaining > 0) {
+      const unit = data.segRefs && data.segRefs.length ? 'verses' : 'segments';
+      const step = S.pageSize > 0 ? Math.min(S.pageSize, remaining) : remaining;
+      more.classList.remove('hidden');
+      more.innerHTML = `<span>Showing ${visible.length} of ${rows.length} ${unit}.</span>
+        <button class="ghost small" id="reader-show-more">Show ${step} more</button>`;
+    } else {
+      more.classList.add('hidden');
+      more.innerHTML = '';
+    }
+  }
 }
 
 function renderReader() {
   const data = S.reader;
   if (!data) return;
   renderReaderMeta(data);
+  renderChapterPicker(data);
   renderReaderBody();
   renderPassageCommentaries();
 
@@ -618,11 +835,35 @@ function renderReader() {
       ? `${data.enVersion.title}${data.enVersion.language && data.enVersion.language !== 'english' ? ` (${data.enVersion.languageLabel})` : ''}`
       : '');
   const license = data.license ? ` · ${data.license}` : '';
+  // Say which reading the transliteration used, but only when the passage
+  // actually carries the name — otherwise it is noise on every page.
+  const nameNote = S.showTranslit && Array.isArray(data.rows) && data.rows.some((r) => hasDivineName(r.he))
+    ? ` · Divine name read as ${data.divineName === 'adonai' ? 'Adonai' : 'HaShem'}`
+    : '';
+  // Filling the gaps is an offer, not a side effect of opening the page.
+  const missing = Number(data.missingEnglish) || 0;
+  const canTranslate = Boolean(data.canAiTranslate) && missing > 0 && !S.translateBusy;
+  const translateCtl = S.translateBusy
+    ? '<span class="muted small">Translating…</span> <button class="ghost small" id="reader-translate-stop">Stop</button>'
+    : (canTranslate
+      ? `<button class="ghost small" id="reader-translate-ai">Translate ${missing} segment${missing === 1 ? '' : 's'} with AI</button>`
+      : '');
   $('#reader-foot').innerHTML = `
-    <span>${esc(enTitle)}${esc(license)}</span>
+    <span>${esc(enTitle)}${esc(license)}${esc(nameNote)}</span>
     <span>${data.translationNote ? esc(data.translationNote) : (data.availableVersions && data.availableVersions.length
       ? `${data.availableVersions.length} English versions available on Sefaria`
-      : '')}</span>`;
+      : '')}</span>
+    <span>${translateCtl}</span>`;
+  const translateBtn = $('#reader-translate-ai');
+  if (translateBtn) translateBtn.onclick = () => translateMissing();
+  const translateStop = $('#reader-translate-stop');
+  if (translateStop) {
+    translateStop.onclick = async () => {
+      translateStop.disabled = true;
+      translateStop.textContent = 'Stopping…';
+      try { await api.rpc('translate.cancel'); } catch { /* the call in flight reports the rest */ }
+    };
+  }
 
   $('#reader-prev').disabled = !data.prev;
   $('#reader-next').disabled = !data.next;
@@ -630,9 +871,58 @@ function renderReader() {
 
 let openSeq = 0;
 
+/**
+ * Translate the segments of the open passage that Sefaria leaves untranslated.
+ * Only ever runs from the button (or the explicit setting), and the server
+ * cancels the previous batch if another passage is translated first.
+ */
+async function translateMissing() {
+  const data = S.reader;
+  if (!data || S.translateBusy) return;
+  const missing = [];
+  data.rows.forEach((row, index) => {
+    if (row.he && row.he.trim() && !(row.en && row.en.trim())) missing.push({ index, he: row.he });
+  });
+  if (!missing.length) return;
+  const requestId = `tr-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  S.translateBusy = true;
+  S.translateReq = requestId;
+  renderReader();
+  setAiStatus(`Translating ${missing.length} segment${missing.length === 1 ? '' : 's'}…`, 'busy');
+  try {
+    const res = await api.rpc('translate.missing', {
+      ref: data.ref,
+      segments: missing.map((m) => m.he),
+      requestId,
+    });
+    let filled = 0;
+    missing.forEach((m, i) => {
+      const en = String((res.en && res.en[i]) || '').trim();
+      if (!en) return;
+      data.rows[m.index].en = en;
+      data.rows[m.index].machineTranslation = true;
+      filled += 1;
+    });
+    data.machineTranslation = filled > 0;
+    data.canAiTranslate = false;
+    data.missingEnglish = 0;
+    data.translationNote = res.note || data.translationNote;
+    if (filled) toast(`Added ${filled} AI translation${filled === 1 ? '' : 's'}`);
+  } catch (err) {
+    if (err.code === 'CANCELLED') toast('Translation stopped');
+    else toast(err.message, 'err');
+  } finally {
+    S.translateBusy = false;
+    S.translateReq = '';
+    setAiStatus('');
+    renderReader();
+  }
+}
+
 function renderLoadedText(data, { recent = true } = {}) {
   const previous = S.reader && S.reader.ref;
   S.reader = data;
+  S.readerShown = S.pageSize > 0 ? S.pageSize : 0;
   // Reopening the same passage keeps any commentary already chosen; only a
   // different passage starts from a clean slate.
   if (previous !== data.ref) resetCommentaryState();
@@ -640,6 +930,12 @@ function renderLoadedText(data, { recent = true } = {}) {
   $('#reader-external').onclick = () => api.openExternal(`https://www.sefaria.org/${enc(data.ref.replace(/ /g, '_'))}`);
   if (recent) addRecent(data.ref);
   document.querySelector('.main').scrollTop = 0;
+  // Opt-in only: the setting says the person accepts a minute of local
+  // inference per untranslated passage.
+  if (S.autoTranslate && data.canAiTranslate && !data.autoStarted) {
+    data.autoStarted = true;
+    translateMissing();
+  }
 }
 
 async function openRef(ref, { recent = true, version } = {}) {
@@ -691,35 +987,148 @@ function allWorks() {
   return S._allWorks;
 }
 
-function renderLibNode(node, parents) {
-  const name = node.title || node.category;
-  const depth = parents.length;
-  const hasChildren = Array.isArray(node.contents) && node.contents.length > 0;
-  const indent = 8 + depth * 16;
+/** Work leaves carry a title and no children; everything else is a shelf. */
+function isWorkNode(node) {
+  return Boolean(node && node.title && !(Array.isArray(node.contents) && node.contents.length));
+}
 
-  if (hasChildren) {
-    const key = [...parents, name].join(' › ');
-    const open = S.libOpen.has(key);
-    return `<div class="lib-branch">
-      <button class="lib-row lib-cat" data-lib-toggle="${esc(key)}" style="padding-left:${indent}px">
-        <span class="lib-caret">${open ? '▾' : '▸'}</span>
-        <span class="lib-title">${esc(name)}</span>
-      </button>
-      ${open ? `<div class="lib-children">${node.contents.map((child) => renderLibNode(child, [...parents, name])).join('')}</div>` : ''}
-    </div>`;
+/** The node at a full path, or null when the path does not exist. */
+function libNodeAt(path) {
+  let nodes = S.library || [];
+  let node = null;
+  for (const name of path) {
+    node = (nodes || []).find((n) => (n.title || n.category) === name) || null;
+    if (!node) return null;
+    nodes = node.contents || [];
   }
+  return node;
+}
 
-  const title = node.title || name;
-  return `<button class="lib-row lib-work" data-lib-work="${esc(title)}" style="padding-left:${indent}px">
-    <span class="lib-caret"></span>
-    <span class="lib-title">${esc(name)}</span>
-    ${node.heTitle ? `<span class="lib-he">${esc(node.heTitle)}</span>` : ''}
+function libChildrenAt(depth) {
+  let nodes = S.library || [];
+  for (let i = 0; i < depth; i++) {
+    const node = (nodes || []).find((n) => (n.title || n.category) === S.libPath[i]);
+    if (!node) return [];
+    nodes = node.contents || [];
+  }
+  return nodes || [];
+}
+
+/** The work whose chapters belong in the last column, if one is selected. */
+function selectedWork() {
+  const node = S.libPath.length ? libNodeAt(S.libPath) : null;
+  return isWorkNode(node) ? node : null;
+}
+
+/** How many works sit under a shelf, memoised per node. */
+function workCount(node) {
+  if (!node || !Array.isArray(node.contents) || !node.contents.length) return 0;
+  if (!S._libCounts) S._libCounts = new WeakMap();
+  if (S._libCounts.has(node)) return S._libCounts.get(node);
+  const n = node.contents.reduce((sum, child) => sum + (isWorkNode(child) ? 1 : workCount(child)), 0);
+  S._libCounts.set(node, n);
+  return n;
+}
+
+function shelfRow(node, depth) {
+  const name = node.title || node.category;
+  const work = isWorkNode(node);
+  const count = work ? 0 : workCount(node);
+  const selected = S.libPath[depth] === name;
+  return `<button class="shelf-row${work ? ' is-work' : ''}${selected ? ' is-selected' : ''}"
+      data-lib-select="${esc(name)}" data-lib-level="${depth}" title="${esc(name)}">
+    <span class="shelf-name">${esc(name)}</span>
+    ${node.heTitle ? `<span class="shelf-he" dir="rtl">${esc(node.heTitle)}</span>` : ''}
+    ${count ? `<span class="shelf-note">${count} work${count === 1 ? '' : 's'}</span>` : ''}
   </button>`;
 }
 
+function shelfColumn(depth) {
+  const nodes = libChildrenAt(depth);
+  if (!nodes.length) return '';
+  const label = depth === 0
+    ? 'Tradition'
+    : (nodes.every(isWorkNode) ? 'Work' : 'Category');
+  return `<div class="shelf" data-depth="${depth}">
+    <div class="shelf-head"><span>${label}</span><span class="shelf-count">${nodes.length}</span></div>
+    <div class="shelf-body">${nodes.map((n) => shelfRow(n, depth)).join('')}</div>
+  </div>`;
+}
+
+function chapterColumn() {
+  const work = selectedWork();
+  const loaded = work && S.libChaptersFor === work.title ? S.libChapters : null;
+  const unitName = loaded && loaded.unitLabel === 'daf' ? 'Daf' : 'Chapter';
+  const head = (count) => `<div class="shelf-head"><span>${unitName}</span><span class="shelf-count">${count || ''}</span></div>`;
+  if (!work) {
+    return `<div class="shelf shelf-chapters">${head('')}
+      <div class="shelf-body shelf-empty">Pick a work to see its chapters.</div></div>`;
+  }
+  const title = work.title;
+  if (S.libChaptersFor === title && S.libChapterError) {
+    return `<div class="shelf shelf-chapters">${head('')}
+      <div class="shelf-body"><div class="shelf-empty">Could not list chapters: ${esc(S.libChapterError)}
+        <div><button class="ghost small" data-lib-open="${esc(title)}">Open the work instead</button></div>
+      </div></div></div>`;
+  }
+  const book = loaded;
+  if (!book) {
+    return `<div class="shelf shelf-chapters">${head('')}
+      <div class="shelf-body"><div class="loading-card"><div class="spinner"></div><div>Loading ${esc(title)}…</div></div></div></div>`;
+  }
+  const sections = book.sections || [];
+  const index = Math.min(S.libSection || 0, Math.max(0, sections.length - 1));
+  const section = sections[index];
+  if (!section) {
+    return `<div class="shelf shelf-chapters">${head('')}
+      <div class="shelf-body"><div class="shelf-empty">Sefaria lists no chapters for ${esc(title)}.
+        <div><button class="ghost small" data-lib-open="${esc(title)}">Open the work</button></div>
+      </div></div></div>`;
+  }
+  const unitWord = book.unitLabel === 'daf'
+    ? (book.total === 1 ? 'daf' : 'dapim')
+    : (book.total === 1 ? 'chapter' : 'chapters');
+  const current = S.reader ? String(S.reader.ref || '') : '';
+  const isCurrent = (unit) => current === unit.ref || current.startsWith(`${unit.ref} `) || current.startsWith(`${unit.ref}:`);
+  const startButton = section.units[0]
+    ? `<button class="primary small" data-open-ref="${esc(section.units[0].ref)}">Start reading →</button>`
+    : '';
+  const picker = sections.length > 1
+    ? `<select id="lib-section" class="chap-section" aria-label="Section of ${esc(title)}">
+        ${sections.map((s, i) => `<option value="${i}" ${i === index ? 'selected' : ''}>${esc(s.label)}${s.heTitle ? ` · ${esc(s.heTitle)}` : ''}</option>`).join('')}
+      </select>`
+    : '';
+  return `<div class="shelf shelf-chapters">${head(book.total)}
+    <div class="shelf-body">
+      <div class="chap-work">
+        <div>
+          <div><span class="ref-title">${esc(book.title)}</span>${book.heTitle ? `<span class="he-title">${esc(book.heTitle)}</span>` : ''}</div>
+          <div class="chap-note">${book.total} ${unitWord}${book.complex ? ` in ${sections.length} sections` : ''}</div>
+        </div>
+        ${startButton}
+      </div>
+      ${picker}
+      <div class="chap-grid">
+        ${section.units.map((u) => `<button class="chap${isCurrent(u) ? ' is-current' : ''}" data-open-ref="${esc(u.ref)}" title="${esc(u.ref)}">${esc(u.label)}</button>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderShelves() {
+  const host = $('#lib-shelves');
+  if (!host || !S.library) return;
+  const cols = [];
+  for (let depth = 0; depth <= S.libPath.length; depth++) cols.push(shelfColumn(depth));
+  cols.push(chapterColumn());
+  host.innerHTML = cols.filter(Boolean).join('');
+  const active = host.querySelector('.shelf-row.is-selected');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
 function renderLibrary() {
-  const tree = $('#lib-tree');
-  if (!tree) return;
+  const host = $('#lib-shelves');
+  if (!host) return;
   if (!S.library) return;
   const q = S.libFilter.trim().toLowerCase();
   renderLibraryBreadcrumb();
@@ -729,21 +1138,43 @@ function renderLibrary() {
       w.title.toLowerCase().includes(q) || (w.heTitle || '').includes(S.libFilter.trim()));
     S.libMatches = matches.slice(0, 150);
     $('#lib-count').textContent = `${matches.length}${matches.length > 150 ? '+' : ''} matching works`;
-    tree.innerHTML = S.libMatches.length
-      ? S.libMatches.map((w) => `
-        <button class="lib-row lib-work" data-lib-work="${esc(w.title)}">
-          <span class="lib-caret"></span>
-          <span class="lib-title">${esc(w.title)}</span>
-          ${w.heTitle ? `<span class="lib-he">${esc(w.heTitle)}</span>` : ''}
-          <span class="lib-breadcrumb">${esc(w.path.join(' › '))}</span>
-        </button>`).join('')
-      : '<p class="muted small" style="padding:12px">No works match that filter.</p>';
+    host.innerHTML = `<div class="shelf shelf-results">
+      <div class="shelf-head"><span>Matches</span><span class="shelf-count">${S.libMatches.length}</span></div>
+      <div class="shelf-body">${S.libMatches.length
+        ? S.libMatches.map((w) => `
+          <button class="shelf-row is-work" data-lib-work="${esc(w.title)}" data-lib-work-path="${esc(w.path.join(' › '))}">
+            <span class="shelf-name">${esc(w.title)}</span>
+            ${w.heTitle ? `<span class="shelf-he" dir="rtl">${esc(w.heTitle)}</span>` : ''}
+            <span class="shelf-note">${esc(w.path.join(' › '))}</span>
+          </button>`).join('')
+        : '<div class="shelf-empty">No works match that filter.</div>'}
+      </div>
+    </div>`;
     return;
   }
 
   $('#lib-count').textContent = `${allWorks().length} works`;
-  tree.innerHTML = S.library.map((node) => renderLibNode(node, [])).join('');
+  renderShelves();
   renderLibraryBreadcrumb();
+}
+
+/** Chapters for the work picked on the shelf; the column shows a spinner until they arrive. */
+async function loadLibChapters(title) {
+  if (!title || S.libChaptersFor === title) return;
+  S.libChaptersFor = title;
+  S.libChapters = null;
+  S.libChapterError = '';
+  S.libSection = 0;
+  renderShelves();
+  try {
+    const book = await api.rpc('library.chapters', { title });
+    if (S.libChaptersFor !== title) return;
+    S.libChapters = book;
+  } catch (err) {
+    if (S.libChaptersFor !== title) return;
+    S.libChapterError = err.message;
+  }
+  renderShelves();
 }
 
 /** The trail back up the shelf: All works › Tanakh › Torah. */
@@ -762,46 +1193,57 @@ function renderLibraryBreadcrumb() {
 }
 
 /**
- * Open the library at a category path, expanding every level down to it.
- * Used by the reader breadcrumb and by the library's own trail.
+ * Trim a path the table of contents cannot follow (a text's category names do
+ * not always match the shelf) to the deepest level that exists, preferring the
+ * known path of the work when one is given.
+ */
+function resolveLibraryPath(target) {
+  if (!target.length || libNodeAt(target)) return target;
+  const title = target[target.length - 1];
+  const hit = allWorks().find((w) => w.title === title);
+  if (hit) return [...hit.path, hit.title];
+  const path = [];
+  let nodes = S.library || [];
+  for (const name of target) {
+    const found = (nodes || []).find((n) => (n.title || n.category) === name);
+    if (!found) break;
+    path.push(name);
+    nodes = found.contents || [];
+  }
+  return path;
+}
+
+/**
+ * Open the library at a path — category levels, optionally ending on a work so
+ * its chapter grid is showing. Used by the reader breadcrumb and title.
  */
 function showLibraryAt(path) {
   const target = (path || []).filter(Boolean);
   S.libFilter = '';
   if ($('#lib-filter')) $('#lib-filter').value = '';
   S.libPath = target.slice();
-  for (let i = 1; i <= target.length; i++) S.libOpen.add(target.slice(0, i).join(' › '));
   setView('library');
-  const restoreScroll = S.libReturnPath && S.libReturnPath.join(' › ') === target.join(' › ')
-    ? S.libScroll : null;
-  ensureLibrary().then(() => {
+  const reveal = () => {
+    S.libPath = resolveLibraryPath(target);
+    renderLibrary();
     renderLibraryBreadcrumb();
-    requestAnimationFrame(() => {
-      const key = target.join(' › ');
-      const el = key
-        ? [...document.querySelectorAll('#lib-tree [data-lib-toggle]')].find((n) => n.dataset.libToggle === key)
-        : null;
-      if (el) {
-        el.scrollIntoView({ block: 'center' });
-        el.classList.add('lib-hit');
-        setTimeout(() => el.classList.remove('lib-hit'), 1400);
-      } else {
-        document.querySelector('.main').scrollTop = restoreScroll || 0;
-      }
-    });
-  });
+    const work = selectedWork();
+    if (work) loadLibChapters(work.title);
+  };
+  ensureLibrary().then(reveal);
 }
 
 async function ensureLibrary() {
   if (S.library) { renderLibrary(); return; }
-  $('#lib-tree').innerHTML = '<div class="loading-card"><div class="spinner"></div><div>Loading the Sefaria library…</div></div>';
+  $('#lib-shelves').innerHTML = '<div class="loading-card"><div class="spinner"></div><div>Loading the Sefaria library…</div></div>';
   $('#lib-count').textContent = '';
   try {
     S.library = await api.rpc('library.toc');
     S._allWorks = null;
+    S._libCounts = null;
     renderLibrary();
   } catch (err) {
-    $('#lib-tree').innerHTML = `<div class="error-card"><strong>Could not load the library</strong>${esc(err.message)}<div><button class="ghost" data-lib-retry>Retry</button></div></div>`;
+    $('#lib-shelves').innerHTML = `<div class="error-card"><strong>Could not load the library</strong>${esc(err.message)}<div><button class="ghost" data-lib-retry>Retry</button></div></div>`;
   }
 }
 
@@ -835,6 +1277,7 @@ async function showWord(word, segIndex, el) {
       word,
       verseHe: row ? row.he : '',
       verseEn: row ? row.en : '',
+      divineName: S.reader ? S.reader.divineName : '',
     });
     renderWordPanel(data, row, word, segIndex);
   } catch (err) {
@@ -846,13 +1289,23 @@ async function showWord(word, segIndex, el) {
   }
 }
 
+/**
+ * The three main traditions stay visible; whichever extra tradition is in use
+ * (Yemeni, Kavkazi, either Ancient) is appended as a fourth row so the panel
+ * never hides the style in use, without adding permanent rows nobody asked for.
+ */
+function translitRows(pick) {
+  const styles = CORE_STYLES.includes(S.style) ? CORE_STYLES : [...CORE_STYLES, S.style];
+  return styles.map((style) => `
+    <div class="trio-row ${style === S.style ? 'is-primary' : ''}">
+      <span class="label">${STYLE_LABELS[style] || style}</span>
+      <span class="value">${esc(pick(style) || '—')}</span>
+    </div>`).join('');
+}
+
 function renderWordPanel(data, row, word, segIndex) {
   const t = data.translit || {};
-  const trio = ['modern', 'ashkenazi', 'mizrahi'].map((style) => `
-    <div class="trio-row ${style === S.style ? 'is-primary' : ''}">
-      <span class="label">${style === 'modern' ? 'Modern' : style === 'ashkenazi' ? 'Ashkenazi' : 'Mizrahi'}</span>
-      <span class="value">${esc(t[style] && t[style] !== t.he ? t[style] : '—')}</span>
-    </div>`).join('');
+  const trio = translitRows((style) => (t[style] && t[style] !== t.he ? t[style] : '—'));
 
   const lex = (data.entries || []).map((entry) => {
     const senses = (entry.senses || []).map((s) =>
@@ -908,14 +1361,17 @@ function currentContext() {
   const card = node.closest('.source-card');
   let contextHe = '';
   let contextEn = '';
+  let ref = '';
   if (seg && S.reader) {
-    const row = S.reader.rows[Number(seg.dataset.seg)];
+    const index = Number(seg.dataset.seg);
+    const row = S.reader.rows[index];
     if (row) { contextHe = row.he; contextEn = row.en; }
+    ref = (S.reader.segRefs && S.reader.segRefs[index]) || S.reader.ref || '';
   } else if (card && S.askResult) {
     const src = S.askResult.sources[Number(card.dataset.index)];
-    if (src) { contextHe = src.he; contextEn = src.en; }
+    if (src) { contextHe = src.he; contextEn = src.en; ref = src.ref || ''; }
   }
-  return { text, rect: range.getBoundingClientRect(), contextHe, contextEn };
+  return { text, rect: range.getBoundingClientRect(), contextHe, contextEn, ref };
 }
 
 function showSelectionToolbar() {
@@ -923,7 +1379,7 @@ function showSelectionToolbar() {
   const tool = $('#seltool');
   if (!ctx) { tool.classList.add('hidden'); selContext = null; return; }
   selContext = ctx;
-  const barWidth = 250;
+  const barWidth = 300;
   const left = Math.min(
     Math.max(10, ctx.rect.left + ctx.rect.width / 2 - barWidth / 2),
     window.innerWidth - barWidth - 10,
@@ -950,13 +1406,14 @@ async function translateSelection(text, contextHe, contextEn) {
   const isHebrew = /[\u0590-\u05FF]/.test(text);
   setPanel({ kicker: 'Selection', title: isHebrew ? 'Translation' : 'Hebrew rendering', loading: true });
   try {
-    const data = await api.rpc('translate', { text, contextHe, contextEn });
+    const data = await api.rpc('translate', {
+      text,
+      contextHe,
+      contextEn,
+      divineName: S.reader ? S.reader.divineName : '',
+    });
     const translit = data.translit || {};
-    const trio = ['modern', 'ashkenazi', 'mizrahi'].map((style) => `
-      <div class="trio-row ${style === S.style ? 'is-primary' : ''}">
-        <span class="label">${style === 'modern' ? 'Modern' : style === 'ashkenazi' ? 'Ashkenazi' : 'Mizrahi'}</span>
-        <span class="value">${esc(translit[style] || '—')}</span>
-      </div>`).join('');
+    const trio = translitRows((style) => translit[style]);
     const body = `
       <div class="panel-section">
         <h3>${isHebrew ? 'Selected text' : 'Selection'}</h3>
@@ -985,13 +1442,13 @@ async function translateSelection(text, contextHe, contextEn) {
 async function translitSelection(text) {
   setPanel({ kicker: 'Selection', title: 'Transliteration', loading: true });
   try {
-    const data = await api.rpc('translit', { text, style: S.style });
+    const data = await api.rpc('translit', {
+      text,
+      style: S.style,
+      divineName: S.reader ? S.reader.divineName : '',
+    });
     const all = data.all || {};
-    const trio = ['modern', 'ashkenazi', 'mizrahi'].map((style) => `
-      <div class="trio-row ${style === S.style ? 'is-primary' : ''}">
-        <span class="label">${style === 'modern' ? 'Modern' : style === 'ashkenazi' ? 'Ashkenazi' : 'Mizrahi'}</span>
-        <span class="value">${esc(all[style] || (style === S.style ? data.out : '—'))}</span>
-      </div>`).join('');
+    const trio = translitRows((style) => all[style] || (style === S.style ? data.out : ''));
     const body = `
       <div class="panel-section">
         <h3>Selected text</h3>
@@ -1099,6 +1556,11 @@ function fillSettings() {
   $('#set-diacritics').checked = s.diacritics !== false;
   $('#set-show-translit').checked = S.showTranslit;
   $('#set-show-english').checked = S.showEnglish;
+  $('#set-show-hebrew').checked = S.showHebrew;
+  $('#set-page-size').value = String(S.pageSize || 0);
+  if ($('#set-keepalive')) $('#set-keepalive').value = s.keepAlive != null ? String(s.keepAlive) : '15m';
+  if ($('#set-numctx')) $('#set-numctx').value = String(s.numCtx || 4096);
+  if ($('#set-autotranslate')) $('#set-autotranslate').checked = s.autoTranslate === true;
   updateProviderHint();
   renderStyleNotes();
   if (S.info) {
@@ -1117,6 +1579,8 @@ function updateProviderHint() {
   refreshLocalStatus('settings');
   if (id === 'ollama') {
     $('#set-provider-hint').innerHTML = 'Runs entirely on this machine. Start Ollama first; no API key is needed.';
+  } else if (id === 'freebuff') {
+    $('#set-provider-hint').innerHTML = 'Questions go through a local named pipe to your Freebuff worker. Start it with <code>npm run freebuff-fifo</code>; the path below is the pipe.';
   } else if (id === 'custom') {
     $('#set-provider-hint').innerHTML = 'Any OpenAI-compatible endpoint: base URL plus model name.';
   } else {
@@ -1154,15 +1618,20 @@ function setupProviderChanged() {
   const local = Boolean(p.local);
   $('#setup-model').placeholder = p.model || 'model name';
   $('#setup-base').placeholder = p.baseUrl || 'https://…/v1';
-  // Custom endpoints have no preset, so they need the URL; a preset can hide it.
-  $('#setup-base-wrap').classList.toggle('hidden', id !== 'custom' && !p.baseUrl);
+  // Custom endpoints have no preset, so they need the URL; the Freebuff
+  // provider needs to show its pipe path. Other presets can hide it.
+  $('#setup-base-wrap').classList.toggle('hidden', id !== 'custom' && id !== 'freebuff' && !p.baseUrl);
   $('#setup-key').disabled = local;
-  $('#setup-key').placeholder = local ? 'not needed for Ollama' : 'paste your key';
-  $('#setup-hint').textContent = local
-    ? 'Ollama runs on this machine. Start it first; no key is needed.'
-    : id === 'custom'
-      ? 'Any OpenAI-compatible /chat/completions endpoint: base URL, model, and key.'
-      : (p.docs ? `Get a key at ${p.docs}. It is stored locally and encrypted when the OS supports it.` : '');
+  $('#setup-key').placeholder = local
+    ? (id === 'freebuff' ? 'not needed for the local pipe' : 'not needed for Ollama')
+    : 'paste your key';
+  $('#setup-hint').textContent = id === 'freebuff'
+    ? 'Questions go through a local named pipe. Start the worker with “npm run freebuff-fifo”; no key is needed.'
+    : local
+      ? 'Ollama runs on this machine. Start it first; no key is needed.'
+      : id === 'custom'
+        ? 'Any OpenAI-compatible /chat/completions endpoint: base URL, model, and key.'
+        : (p.docs ? `Get a key at ${p.docs}. It is stored locally and encrypted when the OS supports it.` : '');
   refreshLocalStatus('setup');
 }
 
@@ -1246,7 +1715,9 @@ async function saveSettings(patch, { quiet = false } = {}) {
     S.fontSize = S.settings.fontSize || S.fontSize;
     S.showTranslit = S.settings.showTranslit !== false;
     S.showEnglish = S.settings.showEnglish !== false;
-    S.showCommentaries = S.settings.showCommentaries !== false;
+    S.showHebrew = S.settings.showHebrew !== false;      S.showCommentaries = S.settings.showCommentaries !== false;
+    S.pageSize = Number(S.settings.pageSize) || 0;
+    S.autoTranslate = S.settings.autoTranslate === true;
     applyReadingSettings();
     if (S.askResult) renderAnswer(S.askResult);
     if (S.reader) renderReader();
@@ -1267,7 +1738,11 @@ function collectSettings() {
     style: $('#set-style').value,
     fontSize: Number($('#set-font').value),
     diacritics: $('#set-diacritics').checked,
+    keepAlive: $('#set-keepalive') ? $('#set-keepalive').value : undefined,
+    numCtx: $('#set-numctx') ? Number($('#set-numctx').value) : undefined,
+    autoTranslate: $('#set-autotranslate') ? $('#set-autotranslate').checked : false,
   };
+  for (const k of ['keepAlive', 'numCtx']) if (patch[k] === undefined) delete patch[k];
   const key = $('#set-apikey').value.trim();
   if (key) patch.apiKey = key;
   if ($('#set-apikey').dataset.clear === '1') { patch.apiKey = ''; $('#set-apikey').dataset.clear = '0'; }
@@ -1310,6 +1785,11 @@ function bindEvents() {
   });
 
   // ask
+  $('#ask-context-clear').addEventListener('click', () => {
+    S.askContext = null;
+    renderAskContext();
+    $('#ask-input').focus();
+  });
   $('#ask-form').addEventListener('submit', (e) => {
     e.preventDefault();
     runAsk($('#ask-input').value);
@@ -1345,6 +1825,14 @@ function bindEvents() {
     if (S.reader) renderReader();
     if (S.askResult) renderAnswer(S.askResult);
   });
+  $('#style-more').addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    S.style = e.target.value;
+    applyReadingSettings();
+    saveSettings({ style: S.style }, { quiet: true });
+    if (S.reader) renderReader();
+    if (S.askResult) renderAnswer(S.askResult);
+  });
   $('#tgl-translit').addEventListener('change', (e) => {
     S.showTranslit = e.target.checked;
     saveSettings({ showTranslit: S.showTranslit }, { quiet: true });
@@ -1356,6 +1844,27 @@ function bindEvents() {
     saveSettings({ showEnglish: S.showEnglish }, { quiet: true });
     if (S.reader) renderReader();
     if (S.askResult) renderAnswer(S.askResult);
+  });
+  $('#tgl-hebrew').addEventListener('change', (e) => {
+    S.showHebrew = e.target.checked;
+    saveSettings({ showHebrew: S.showHebrew }, { quiet: true });
+    if (S.reader) renderReader();
+    if (S.askResult) renderAnswer(S.askResult);
+  });
+  const changePageSize = (value) => {
+    S.pageSize = Number(value) || 0;
+    S.readerShown = S.pageSize > 0 ? S.pageSize : 0;
+    applyReadingSettings();
+    saveSettings({ pageSize: S.pageSize }, { quiet: true });
+    if (S.reader) renderReaderBody();
+  };
+  $('#reader-page-size').addEventListener('change', (e) => changePageSize(e.target.value));
+  $('#set-page-size').addEventListener('change', (e) => changePageSize(e.target.value));
+  $('#reader-more').addEventListener('click', (e) => {
+    if (!e.target.closest('#reader-show-more') || !S.reader) return;
+    const total = (S.reader.rows || []).length;
+    S.readerShown = Math.min(total, (S.readerShown || S.pageSize || total) + Math.max(S.pageSize, 1));
+    renderReaderBody();
   });
   $('#tgl-commentaries').addEventListener('change', (e) => {
     S.showCommentaries = e.target.checked;
@@ -1375,6 +1884,12 @@ function bindEvents() {
     if (S.reader) renderReader();
     if (S.askResult) renderAnswer(S.askResult);
   });
+  $('#set-show-hebrew').addEventListener('change', (e) => {
+    S.showHebrew = e.target.checked;
+    saveSettings({ showHebrew: S.showHebrew }, { quiet: true });
+    if (S.reader) renderReader();
+    if (S.askResult) renderAnswer(S.askResult);
+  });
   const changeFont = (delta) => {
     S.fontSize = Math.max(16, Math.min(32, S.fontSize + delta));
     applyReadingSettings();
@@ -1390,22 +1905,44 @@ function bindEvents() {
     clearTimeout(libTimer);
     libTimer = setTimeout(renderLibrary, 120);
   });
-  $('#lib-tree').addEventListener('click', (e) => {
-    const toggle = e.target.closest('[data-lib-toggle]');
-    if (toggle) {
-      const key = toggle.dataset.libToggle;
-      if (S.libOpen.has(key)) {
-        S.libOpen.delete(key);
-        if (S.libPath.join(' › ').startsWith(key)) S.libPath = key.split(' › ').slice(0, -1);
+  $('#lib-shelves').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-lib-select]');
+    if (row) {
+      const level = Number(row.dataset.libLevel);
+      const name = row.dataset.libSelect;
+      if (S.libPath[level] === name && S.libPath.length === level + 1) return;
+      S.libPath = S.libPath.slice(0, level).concat(name);
+      const node = libNodeAt(S.libPath);
+      if (isWorkNode(node)) {
+        loadLibChapters(node.title);
       } else {
-        S.libOpen.add(key);
-        S.libPath = key.split(' › ');
+        // A different shelf: the last work's chapters no longer apply.
+        S.libChaptersFor = '';
+        S.libChapters = null;
+        S.libChapterError = '';
+        renderLibrary();
       }
-      renderLibrary();
+      renderLibraryBreadcrumb();
       return;
     }
-    const work = e.target.closest('[data-lib-work]');
-    if (work) { openWork(work.dataset.libWork); }
+    // A filtered work: place it on its shelf and show its chapters.
+    const hit = e.target.closest('[data-lib-work]');
+    if (hit) {
+      const path = String(hit.dataset.libWorkPath || '').split(' › ').filter(Boolean);
+      showLibraryAt([...path, hit.dataset.libWork]);
+    }
+  });
+  $('#lib-shelves').addEventListener('change', (e) => {
+    if (e.target.id !== 'lib-section') return;
+    S.libSection = Number(e.target.value) || 0;
+    renderShelves();
+  });
+
+  // reader chapter jump
+  $('#reader-chapter').addEventListener('change', (e) => {
+    const ref = e.target.value;
+    if (!ref || ref === S.readerChapterRef) return;
+    openRef(ref);
   });
 
   // word clicks
@@ -1441,7 +1978,23 @@ function bindEvents() {
     const libBack = e.target.closest('[data-lib-back]');
     if (libBack) { setView('library'); return; }
     const libRoot = e.target.closest('[data-lib-root]');
-    if (libRoot) { S.libPath = []; setView('library'); renderLibraryBreadcrumb(); document.querySelector('.main').scrollTop = 0; return; }
+    if (libRoot) {
+      S.libPath = [];
+      S.libChaptersFor = '';
+      S.libChapters = null;
+      setView('library');
+      renderLibrary();
+      document.querySelector('.main').scrollTop = 0;
+      return;
+    }
+    const libWorkAt = e.target.closest('[data-lib-work-at]');
+    if (libWorkAt) {
+      const cats = (S.reader && S.reader.categories) || [];
+      showLibraryAt([...cats, libWorkAt.dataset.libWorkAt]);
+      return;
+    }
+    const libOpen = e.target.closest('[data-lib-open]');
+    if (libOpen) { openWork(libOpen.dataset.libOpen); return; }
     const libPath = e.target.closest('[data-lib-path]');
     if (libPath) {
       showLibraryAt(String(libPath.dataset.libPath || '').split(' › ').filter(Boolean));
@@ -1473,6 +2026,20 @@ function bindEvents() {
       clearSelection();
       setView('ask');
       runAsk(ctx.text);
+    }
+    if (btn.dataset.sel === 'ask') {
+      S.askContext = {
+        text: ctx.text,
+        ref: ctx.ref || '',
+        contextHe: ctx.contextHe || '',
+        contextEn: ctx.contextEn || '',
+      };
+      clearSelection();
+      setView('ask');
+      renderAskContext();
+      $('#ask-input').value = '';
+      $('#ask-input').placeholder = 'Ask a question about the selected text…';
+      $('#ask-input').focus();
     }
   });
   document.addEventListener('scroll', () => $('#seltool').classList.add('hidden'), true);
@@ -1514,6 +2081,31 @@ function bindEvents() {
   $('#set-local-check').addEventListener('click', () => refreshLocalStatus('settings'));
   $('#setup-local-check').addEventListener('click', () => refreshLocalStatus('setup'));
 
+  // Local model resources: report what is loaded, and give the memory back on
+  // request rather than waiting for keep_alive to expire.
+  $('#set-ps').addEventListener('click', async () => {
+    const out = $('#set-resource-status');
+    out.textContent = 'Checking what is loaded…';
+    try {
+      const { models } = await api.rpc('llm.ps');
+      out.textContent = models.length
+        ? models.map((m) => `${m.name}: ${m.size || '?'} GB, ${m.vram ? `${Math.round((m.vram / m.size) * 100)}% in VRAM` : 'CPU'}, context ${m.contextLength || '?'}`).join(' · ')
+        : 'No model is loaded right now.';
+    } catch (err) {
+      out.textContent = err.message;
+    }
+  });
+  $('#set-free').addEventListener('click', async () => {
+    const out = $('#set-resource-status');
+    out.textContent = 'Unloading…';
+    try {
+      const res = await api.rpc('llm.free');
+      out.textContent = res.unloaded ? `${res.model} unloaded; its memory is free until the next request.` : res.reason;
+    } catch (err) {
+      out.textContent = err.message;
+    }
+  });
+
   // keyboard
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -1541,6 +2133,9 @@ async function init() {
 
   bindEvents();
   renderRecents();
+  // Progress from a running generation (drafts, phases, timings). Subscribing
+  // once is enough: payloads carry the request id they belong to.
+  if (api.onEvent) api.onEvent(handleAiEvent);
 
   try {
     const [settings, info] = await Promise.all([api.rpc('settings.get'), api.rpc('app.info')]);
@@ -1551,7 +2146,10 @@ async function init() {
     S.fontSize = settings.fontSize || 20;
     S.showTranslit = settings.showTranslit !== false;
     S.showEnglish = settings.showEnglish !== false;
+    S.showHebrew = settings.showHebrew !== false;
     S.showCommentaries = settings.showCommentaries !== false;
+    S.pageSize = Number(settings.pageSize) || 0;
+    S.autoTranslate = settings.autoTranslate === true;
   } catch (err) {
     toast(`Could not reach the service layer: ${err.message}`, 'err');
   }
