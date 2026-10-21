@@ -17,7 +17,7 @@ Texts, translations, links, and lexicon entries come from the public Sefaria API
 
 ## Run it
 
-**Prebuilt app** (Windows x64): download `SefariaLens-1.0.10-portable.exe` from the **Releases** page of this repository. Double-click it; no installation or admin rights are required. The portable build unpacks to a temp folder at launch. The SHA-256 of every build is recorded in `dist/SHA256SUMS.txt` (`sha256sum -c dist/SHA256SUMS.txt`).
+**Prebuilt app** (Windows x64): download `SefariaLens-1.0.10-portable.exe` from the **Releases** page of this repository. Double-click it; no installation or admin rights are required. The portable build unpacks to a temp folder at launch. Each release publishes `SHA256SUMS.txt` next to the exe (`sha256sum -c SHA256SUMS.txt`).
 
 **From source** (Node 18+):
 
@@ -30,6 +30,12 @@ npm run dist       # build dist/SefariaLens-1.0.10-portable.exe
 ```
 
 `npm run dev` serves the same UI and RPC service over HTTP, which is handy for working on the interface without rebuilding the desktop app. The test suite uses a bundled mock OpenAI-compatible server (`test/mock-llm.js`), so no provider key is required to run it.
+
+### Releases are built in CI
+
+Pushing an annotated tag `v<version>` that matches `package.json` makes Woodpecker run the tests, package the portable exe on Linux through Wine (`electronuserland/builder:22-wine`), and upload the exe plus `SHA256SUMS.txt` to the Codeberg release. The release notes are the tag annotation itself, so `git tag -a v1.0.11 -F notes.md && git push origin v1.0.11` is the whole release procedure.
+
+The upload step needs a `codeberg_release_token` repository secret; see [Continuous integration](#continuous-integration) for that and for enabling CI in the first place. Without the secret the tests and the build still run, and only the upload fails.
 
 ### Screenshots
 
@@ -328,13 +334,29 @@ Transliteration and the app's own code are original to this project and released
 
 Questions go to your selected AI provider; passage text from Sefaria is included in the prompt. Sefaria receives only text/search requests. Nothing else leaves the machine. Responses are cached locally under the Electron user-data directory; delete that folder to clear it.
 
+## Continuous integration
+
+The pipeline lives in [.woodpecker.yml](.woodpecker.yml) for [Woodpecker](https://woodpecker-ci.org), which Codeberg runs at [ci.codeberg.org](https://ci.codeberg.org). Codeberg does not build a repository until its owner asks for it, so a checkout with a `.woodpecker.yml` and no activation produces no builds at all — which is exactly what an empty commit-status list and a 404 on the badge mean. Activating it is a set of account actions, not a commit:
+
+1. **Request access.** The instance is invitation-only to keep its shared runners from being abused. Open a request through [Codeberg e.V.'s form](https://codeberg.org/Codeberg-e.V./requests/issues/new?template=ISSUE_TEMPLATE%2fWoodpecker-CI.yaml); a volunteer reviews it against the published criteria. Approval is per account, not per repository, so this happens once.
+2. **Sign in** at [ci.codeberg.org](https://ci.codeberg.org) with the Codeberg account.
+3. **Enable the repository** at [ci.codeberg.org/repos/add](https://ci.codeberg.org/repos/add). Repositories the account owns are offered automatically. This is the step that installs the webhook, and nothing else substitutes for it.
+4. **Add the release secret.** In the repository's settings in Woodpecker, create a secret named `codeberg_release_token` holding a Codeberg token with `write:repository` scope (and `read:misc` on Forgejo 1.20 or newer). Only the tag pipeline uses it.
+5. **Push, or open a pull request.** The build appears on the commit once it has run, and the badge at `https://ci.codeberg.org/api/badges/Archaejon/SefariaLens/status.svg` starts resolving.
+
+### What the pipeline runs
+
+| Trigger | Steps | What it proves |
+| --- | --- | --- |
+| push, pull request, manual | `test` | `npm ci` resolves the lockfile and all `node:test` suites pass on Node 22 (`node:22-bookworm`) |
+| tag `v<version>` | `test`, `build-portable`, `release` | the tag matches `package.json`, the portable exe packages under Wine, and the exe plus `SHA256SUMS.txt` reach the Codeberg release |
+
+`test` needs no secrets: the suites use mock servers rather than the network or an AI provider, so a fork's pull request builds the same way. `build-portable` runs on `electronuserland/builder:22-wine`, makes `dist/SefariaLens-<version>-portable.exe`, and fails before packaging if the tag and `package.json` disagree, so a mislabelled artefact cannot be published. `release` uses `woodpeckerci/plugin-release` to create the release, titled from the tag, with the tag annotation as its notes; an existing asset is replaced rather than treated as an error, so re-running a tag pipeline repairs a half-finished release.
+
+Neither tag step runs on ordinary pushes, which keeps normal builds cheap: Codeberg's shared runners offer only `linux/amd64`, and each job pulls and discards its own container, so packaging is deliberately limited to releases.
+
+Run the same checks locally with `npm ci && npm test`, build the exe with `npm run dist`, and validate the pipeline itself with `woodpecker-cli lint .woodpecker.yml` before pushing. `npm run release` cuts the tag and then watches this pipeline, reporting the failing step, the attached exe, and whether its SHA-256 matches `SHA256SUMS.txt`; [CONTRIBUTING.md](CONTRIBUTING.md#release-checklist) has the checklist.
+
 ## Contributing
 
-Issues and pull requests are welcome. Before sending a patch:
-
-```bash
-npm install
-npm test
-```
-
-Codeberg runs the same suite through Woodpecker on every push and pull request ([.woodpecker.yml](.woodpecker.yml)). Please keep the tests green and add one for any behaviour change; the suites are plain `node:test`, so a new file in `test/` is enough. There is no build step for the renderer, and no linter is configured.
+Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) has the development setup, the test suite, the CI pipeline and the release checklist.

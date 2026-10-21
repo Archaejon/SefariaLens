@@ -10,8 +10,9 @@
     "dev": "node tools/devserver.js",
     "test": "node --test test/*.test.js",
     "icon": "node tools/make-icon.js",
-    "dist": "electron-builder --win portable --x64",
-    "freebuff-fifo": "node tools/freebuff-fifo.js"
+    "dist": "electron-builder --win portable --x64 --publish never",
+    "freebuff-fifo": "node tools/freebuff-fifo.js",
+    "release": "node tools/release.js"
   },
   "author": "Sefaria Lens contributors",
   "license": "MIT",
