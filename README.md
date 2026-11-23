@@ -142,7 +142,7 @@ Generation runs at about 9.8 tokens/s and prompt evaluation at about 110 tokens/
 
 ### Local runtime and network exposure
 
-Ollama listens on loopback only (`127.0.0.1:11434`). The desktop app calls it from Electron's main process, so no browser CORS policy is involved and no `OLLAMA_ORIGINS` setting is needed. The browser harness (`npm run dev`) is the one case where the page could call it directly, and it does not: it posts to its own `/rpc` endpoint on `127.0.0.1:4173`, which calls Ollama server-side. Nothing here is meant to be deployed publicly — do not put an Ollama port on a public interface, and do not run the dev harness on one.
+Ollama listens on loopback only (`127.0.0.1:11434`). The desktop app calls it from Electron's main process, so no browser CORS policy is involved and no `OLLAMA_ORIGINS` setting is needed. The browser harness (`npm run dev`) is the one case where the page could call it directly, and it does not: it posts to its own `/rpc` endpoint on `127.0.0.1:4173`, which calls Ollama server-side. Nothing here is meant to be deployed publicly — do not put an Ollama port on a public interface, and do not run the dev harness on one. The harness also refuses `/rpc` and `/events` requests that do not come from its own page (wrong `Host`, a foreign `Origin`, or a body not declared as JSON), so another site open in the same browser cannot drive it.
 
 Search, reading, transliteration, and the lexicon work with no key. Without one, Q&A returns lexical search results labelled as unranked — never canned prose — and offers a link to Settings. On a test machine, point the provider at the bundled mock (`node test/mock-llm.js`, then a Custom provider on `http://127.0.0.1:4199/v1`); its justifications are labelled as mock output and its gloss echoes the word it was asked about, so a test double can never be mistaken for a real answer.
 
@@ -322,13 +322,20 @@ src/service.js       one RPC service used by Electron and the dev harness
 src/sefaria.js       Sefaria client: texts, search, lexicon, links, TOC, shapes
 src/chapters.js      shape → section and chapter refs for the library and reader
 src/answer.js        retrieval pipeline, prompts, gloss, selection and passage translation
-src/llm.js           OpenAI-compatible client with typed errors
-src/translit.js      Hebrew → Latin rules engine, five profiles
+src/llm.js           shared AI service: queueing, budgets, typed errors, OpenAI-compatible client
+src/ollama.js        Ollama's native API: status, context size, keep-alive, streaming
+src/pipe.js          named-pipe client for the Freebuff worker
+src/schemas.js       JSON schemas the model's answers must fit
+src/translit.js      Hebrew → Latin rules engine, seven profiles
 src/divine-name.js   Adonai in liturgy, HaShem elsewhere, from a work's metadata
+src/settings.js      persisted settings; environment overrides stay out of the file
+src/cache.js         disk + memory cache, pruned by age and count
 src/util.js          HTML/footnote stripping, segment normalisation, ref parsing
 renderer/            plain HTML/CSS/JS UI (no build step)
-tools/devserver.js   browser harness exposing the same RPC over HTTP
+tools/devserver.js   browser harness exposing the same RPC over HTTP, same-origin only
 tools/shoot.js       offscreen Electron screenshot harness
+tools/release.js     cut a version tag; tools/watch-release.js follows its pipeline
+tools/freebuff-fifo.js  worker that owns the other end of the Freebuff pipe
 build/icon.png       generated app icon (tools/make-icon.js)
 test/                node:test suites + a mock OpenAI-compatible server
 ```
@@ -341,7 +348,7 @@ Transliteration and the app's own code are original to this project and released
 
 ## Privacy
 
-Questions go to your selected AI provider; passage text from Sefaria is included in the prompt. Sefaria receives only text/search requests. Nothing else leaves the machine. Responses are cached locally under the Electron user-data directory; delete that folder to clear it.
+Questions go to your selected AI provider; passage text from Sefaria is included in the prompt. Sefaria receives only text/search requests. Nothing else leaves the machine. Responses are cached locally under the Electron user-data directory; entries older than thirty days are removed at startup, and deleting that folder clears the rest.
 
 ## Continuous integration
 

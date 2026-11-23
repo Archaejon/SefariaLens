@@ -2,7 +2,7 @@
   "name": "sefaria-lens",
   "productName": "Sefaria Lens",
   "version": "1.0.10",
-  "description": "Sefaria reader with sourced Q&A, transliteration in five traditions, and word-by-word study tools",
+  "description": "Sefaria reader with sourced Q&A, transliteration in seven traditions, and word-by-word study tools",
   "main": "electron/main.js",
   "private": true,
   "scripts": {

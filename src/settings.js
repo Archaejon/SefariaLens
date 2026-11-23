@@ -34,6 +34,13 @@ const DEFAULTS = {
   autoTranslate: false,
 };
 
+const ENV_OVERRIDES = {
+  apiKey: 'SEFARIA_LENS_API_KEY',
+  baseUrl: 'SEFARIA_LENS_BASE_URL',
+  model: 'SEFARIA_LENS_MODEL',
+  provider: 'SEFARIA_LENS_PROVIDER',
+};
+
 /** Persisted app settings. The API key is encrypted by the caller when available. */
 class Settings {
   constructor(file, { encrypt, decrypt, env = process.env } = {}) {
@@ -42,6 +49,9 @@ class Settings {
     this.decrypt = decrypt;
     this.env = env;
     this.data = { ...DEFAULTS };
+    // What the file holds for each value an environment variable is standing
+    // in for, so a save writes that back rather than the override.
+    this.shadowed = {};
     this.load();
   }
 
@@ -54,11 +64,15 @@ class Settings {
       this.data = data;
     } catch { /* first run */ }
 
-    // Environment overrides make headless testing and CI possible.
-    if (this.env.SEFARIA_LENS_API_KEY) this.data.apiKey = this.env.SEFARIA_LENS_API_KEY;
-    if (this.env.SEFARIA_LENS_BASE_URL) this.data.baseUrl = this.env.SEFARIA_LENS_BASE_URL;
-    if (this.env.SEFARIA_LENS_MODEL) this.data.model = this.env.SEFARIA_LENS_MODEL;
-    if (this.env.SEFARIA_LENS_PROVIDER) this.data.provider = this.env.SEFARIA_LENS_PROVIDER;
+    // Environment overrides make headless testing and CI possible. They apply
+    // to this run only: a key handed over in the environment must not end up
+    // in the settings file because some unrelated setting was saved.
+    this.shadowed = {};
+    for (const [field, name] of Object.entries(ENV_OVERRIDES)) {
+      if (!this.env[name]) continue;
+      this.shadowed[field] = this.data[field];
+      this.data[field] = this.env[name];
+    }
   }
 
   get() {
@@ -76,6 +90,8 @@ class Settings {
     for (const [k, v] of Object.entries(patch || {})) {
       if (!(k in DEFAULTS)) continue;
       next[k] = v;
+      // A value the user sets replaces the override for good.
+      delete this.shadowed[k];
     }
     if (patch && Object.prototype.hasOwnProperty.call(patch, 'apiKey') && patch.apiKey === '') {
       next.apiKey = '';
@@ -86,7 +102,7 @@ class Settings {
   }
 
   save() {
-    const out = { ...this.data };
+    const out = { ...this.data, ...this.shadowed };
     if (this.encrypt && out.apiKey) out.apiKey = this.encrypt(out.apiKey);
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
