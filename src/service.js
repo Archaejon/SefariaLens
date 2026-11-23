@@ -61,6 +61,32 @@ function firstRefForSchema(node, title) {
   return null;
 }
 
+// Top-level categories Sefaria's search index files texts under. The Ask tiers
+// carry a few more (Philosophy), which the index does not have.
+const SEARCH_SCOPES = [
+  'Tanakh', 'Talmud', 'Mishnah', 'Midrash', 'Halakhah', 'Kabbalah',
+  'Liturgy', 'Jewish Thought', 'Chasidut', 'Musar', 'Responsa',
+];
+
+// A commentary is indexed under its own root — "Tanakh Commentary/..." rather
+// than "Tanakh/..." — while a primary text or a halakhic code keeps its path.
+const COMMENTARY_ROOTS = {
+  Tanakh: 'Tanakh Commentary',
+  Talmud: 'Talmud Commentary',
+  Mishnah: 'Mishnah Commentary',
+};
+const COMMENTARY_BRANCH = /commentary|rishonim|acharonim/i;
+
+/** The path Sefaria's search index files a work under, from its categories. */
+function workSearchPath(title, categories) {
+  const path = (categories || []).filter(Boolean).map(String);
+  if (!path.length) return title;
+  const root = path.slice(1).some((c) => COMMENTARY_BRANCH.test(c))
+    ? (COMMENTARY_ROOTS[path[0]] || path[0])
+    : path[0];
+  return [root, ...path.slice(1), title].join('/');
+}
+
 /**
  * The single service layer. Both the Electron IPC bridge and the browser dev
  * harness call these methods, so behaviour stays identical in both shells.
@@ -83,6 +109,35 @@ function createService({
   // Shapes are small and stable for the life of a session; the reader asks for
   // one on every passage it opens.
   const chapterCache = new Map();
+
+  /**
+   * What a search should be limited to: the path of a single work, or one
+   * top-level category. A work wins over a scope, since it is narrower.
+   */
+  async function searchFilter({ scope, work } = {}) {
+    const title = String(work || '').trim();
+    if (title) {
+      const unknown = () => Object.assign(
+        new Error(`Sefaria has no work called “${title}”. Pick one from the list, or clear the work field.`),
+        { code: 'NOT_FOUND' },
+      );
+      if (typeof sefaria.index !== 'function') return title;
+      let index = null;
+      try {
+        index = await sefaria.index(title);
+      } catch (err) {
+        if (err && err.status === 404) throw unknown();
+        throw err;
+      }
+      // A title the index does not know comes back without categories; searching
+      // it unfiltered would answer a question nobody asked.
+      const categories = (index && index.categories) || [];
+      if (!categories.length) throw unknown();
+      return workSearchPath((index && index.title) || title, categories);
+    }
+    const chosen = String(scope || '').trim();
+    return SEARCH_SCOPES.includes(chosen) ? chosen : '';
+  }
 
   /** A renderer-supplied reading, defaulting to the casual HaShem. */
   const divineParam = (value) => (value === 'adonai' ? 'adonai' : 'hashem');
@@ -205,6 +260,7 @@ function createService({
       platform,
       cacheDir: path.join(appDataDir, 'cache'),
       categories: CATEGORIES,
+      searchScopes: SEARCH_SCOPES,
       styles: STYLE_INFO,
       providers: Object.fromEntries(
         Object.entries(PROVIDERS).map(([k, v]) => [k, {
@@ -229,9 +285,21 @@ function createService({
     // Give the model's memory back now instead of waiting for keep_alive.
     'llm.free': async () => llm.freeMemory(),
 
-    'search': async ({ query, size = 14 } = {}) => {
-      const result = await sefaria.search(query, { size });
-      return result;
+    // Full-text search over the library. `start` pages through the hits, so the
+    // search view can offer "show more" instead of one long request; `scope`
+    // limits it to a category and `work` to a single work.
+    'search': async ({ query, size = 14, start = 0, scope = '', work = '' } = {}) => {
+      const q = String(query || '').trim();
+      if (!q) return { total: 0, took: 0, hits: [] };
+      const take = Math.max(1, Math.min(50, Number(size) || 14));
+      const from = Math.max(0, Number(start) || 0);
+      const filter = await searchFilter({ scope, work });
+      const result = await sefaria.search(q, {
+        size: take,
+        start: from,
+        ...(filter ? { filters: [filter] } : {}),
+      });
+      return { ...result, filter };
     },
 
     'text': async ({ ref, version = 'english' } = {}) => loadText(ref, version),

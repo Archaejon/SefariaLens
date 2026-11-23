@@ -35,6 +35,21 @@ const S = {
   libChaptersFor: '',
   libChapterError: '',
   libSection: 0,
+  // Library search: the query, its hits, and how far into Sefaria's result set
+  // they reach. Kept while the view is left and returned to.
+  searchQuery: '',
+  searchHits: [],
+  searchTotal: 0,
+  searchStart: 0,
+  searchTook: 0,
+  searchMore: false,
+  searchBusy: false,
+  searchError: '',
+  searchSeq: 0,
+  searchScope: '',
+  searchWork: '',
+  workListReady: false,
+  workListLoading: false,
   chaptersCache: new Map(),
   shapeSeq: 0,
   readerChapterRef: '',
@@ -134,6 +149,12 @@ function setView(view) {
   $$('.nav-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.view === view));
   if (view === 'settings') fillSettings();
   if (view === 'library') ensureLibrary();
+  if (view === 'search') {
+    renderSearchScopes();
+    updateThisWork();
+    if ($('#search-input')) $('#search-input').value = S.searchQuery;
+    renderSearch();
+  }
   if (view === 'reader' && !S.reader) {
     $('#reader-text').innerHTML = '';
     $('#reader-meta').innerHTML = '';
@@ -1263,6 +1284,204 @@ async function openWork(title) {
   }
 }
 
+/* ------------------------------------------------------------------ search */
+
+// Rows the reader sees per page. Sefaria returns one hit per version, so a
+// page asks for twice that and is deduplicated by ref afterwards.
+const SEARCH_PAGE = 20;
+const SEARCH_EXAMPLES = [
+  'עולם הבא',
+  'love your neighbor as yourself',
+  'Shabbat candles',
+  'Rashi on Genesis 1',
+];
+
+function clipSnippet(text, max = 280) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  return clean.length > max ? `${clean.slice(0, max).trimEnd()}…` : clean;
+}
+
+/** The category list comes from the service, which knows what the index holds. */
+function renderSearchScopes() {
+  const select = $('#search-scope');
+  if (!select) return;
+  const scopes = (S.info && S.info.searchScopes) || [];
+  if (!scopes.length) return;
+  select.innerHTML = '<option value="">All of Sefaria</option>'
+    + scopes.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  select.value = S.searchScope;
+}
+
+/** Read the two filter controls into state; a work is narrower than a category. */
+function readSearchFilters() {
+  const scopeEl = $('#search-scope');
+  const workEl = $('#search-work');
+  const work = workEl ? workEl.value.trim() : '';
+  S.searchWork = work;
+  S.searchScope = work ? '' : (scopeEl ? scopeEl.value : '');
+  if (scopeEl && work) scopeEl.value = '';
+  return { scope: S.searchScope, work: S.searchWork };
+}
+
+/**
+ * Offer the work titles the library knows, once, the first time the work field
+ * is focused. The field stays usable as plain text while the shelf loads.
+ */
+function fillWorkList() {
+  if (S.workListReady || S.workListLoading) return;
+  S.workListLoading = true;
+  ensureLibrary()
+    .then(() => {
+      const list = $('#search-work-list');
+      if (list) list.innerHTML = allWorks().map((w) => `<option value="${esc(w.title)}"></option>`).join('');
+      S.workListReady = true;
+    })
+    .catch(() => { /* the field still accepts a typed title */ })
+    .finally(() => { S.workListLoading = false; });
+}
+
+/** "This work" is only meaningful while a passage is open in the reader. */
+function updateThisWork() {
+  const btn = $('#search-this-work');
+  if (!btn) return;
+  const title = (S.reader && S.reader.title) || '';
+  btn.classList.toggle('hidden', !title);
+  if (title) btn.title = `Limit the search to ${title}`;
+}
+
+/**
+ * Open the Search view and run `query`. The only entry point, so the nav, the
+ * form, and the selection toolbar leave the same state behind.
+ */
+function goSearch(query) {
+  const q = String(query || '').trim();
+  readSearchFilters();
+  S.searchQuery = q;
+  setView('search');
+  if ($('#search-input')) $('#search-input').value = q;
+  runSearch(q);
+}
+
+async function runSearch(query, { append = false } = {}) {
+  const q = String(query || '').trim();
+  const token = ++S.searchSeq;
+  if (!q) {
+    S.searchQuery = '';
+    S.searchHits = [];
+    S.searchTotal = 0;
+    S.searchStart = 0;
+    S.searchMore = false;
+    S.searchError = '';
+    S.searchBusy = false;
+    renderSearch();
+    return;
+  }
+  const from = append ? S.searchStart : 0;
+  S.searchQuery = q;
+  if (!append) {
+    S.searchHits = [];
+    S.searchTotal = 0;
+    S.searchStart = 0;
+    S.searchMore = false;
+  }
+  S.searchBusy = true;
+  S.searchError = '';
+  renderSearch();
+  try {
+    const res = await api.rpc('search', {
+      query: q, size: SEARCH_PAGE * 2, start: from, scope: S.searchScope, work: S.searchWork,
+    });
+    if (token !== S.searchSeq) return;
+    const raw = res.hits || [];
+    // Sefaria indexes each version separately, so one verse arrives twice (once
+    // Hebrew, once English). One row per passage is what a results list wants.
+    const seen = new Set(S.searchHits.map((h) => h.ref));
+    const fresh = raw.filter((h) => {
+      if (!h.ref || seen.has(h.ref)) return false;
+      seen.add(h.ref);
+      return true;
+    });
+    S.searchHits = append ? S.searchHits.concat(fresh) : fresh;
+    S.searchStart = from + raw.length;
+    S.searchMore = raw.length === SEARCH_PAGE * 2;
+    S.searchTotal = Number(res.total) || S.searchHits.length;
+    S.searchTook = Number(res.took) || 0;
+  } catch (err) {
+    if (token !== S.searchSeq) return;
+    S.searchError = err.message;
+  } finally {
+    if (token === S.searchSeq) {
+      S.searchBusy = false;
+      renderSearch();
+    }
+  }
+}
+
+function renderSearch() {
+  const meta = $('#search-meta');
+  const host = $('#search-results');
+  if (!meta || !host) return;
+
+  if (!S.searchQuery) {
+    meta.textContent = '';
+    host.innerHTML = `
+      <div class="empty-state">
+        <h3>Search the texts themselves</h3>
+        <p class="muted small" style="margin:0 0 14px">Every version Sefaria publishes is searched, so a phrase can be found in Hebrew or in translation. Open a result to read it with its translation and commentaries.</p>
+        <div class="examples">
+          ${SEARCH_EXAMPLES.map((s) => `<button class="example" data-search-example="${esc(s)}">${esc(s)}</button>`).join('')}
+        </div>
+      </div>`;
+    return;
+  }
+
+  if (S.searchError) {
+    meta.textContent = '';
+    host.innerHTML = `<div class="error-card"><strong>Search failed</strong>${esc(S.searchError)}
+      <div><button class="ghost" data-search-retry>Try again</button></div></div>`;
+    return;
+  }
+
+  if (S.searchBusy && !S.searchHits.length) {
+    meta.textContent = '';
+    host.innerHTML = `<div class="loading-card"><div class="spinner"></div>
+      <div>Searching for “${esc(S.searchQuery)}”…</div></div>`;
+    return;
+  }
+
+  const shown = S.searchHits.length;
+  const where = S.searchWork || S.searchScope;
+  const facts = [`${S.searchTotal} match${S.searchTotal === 1 ? '' : 'es'}`];
+  if (S.searchTook) facts.push(`${S.searchTook} ms`);
+  // Sefaria counts indexed versions, not distinct passages, so "showing" is only
+  // useful while there is another page to ask for.
+  if (S.searchMore && shown < S.searchTotal) facts.push(`showing ${shown}`);
+  meta.textContent = `“${S.searchQuery}”${where ? ` in ${where}` : ''} · ${facts.join(' · ')}`;
+
+  if (!shown) {
+    host.innerHTML = `
+      <div class="empty-state">
+        <h3>No matches${where ? ` in ${esc(where)}` : ''}</h3>
+        <p class="muted small" style="margin:0">Sefaria's search is lexical: try fewer words, a name, or the Hebrew term.${where ? ' Or widen the limit above.' : ''}</p>
+      </div>`;
+    return;
+  }
+
+  host.innerHTML = S.searchHits.map((hit) => {
+    const lang = hit.lang === 'he' ? 'Hebrew' : hit.lang === 'en' ? 'English' : String(hit.lang || '').toUpperCase();
+    return `<article class="search-hit">
+      <button class="search-hit-ref" data-open-ref="${esc(hit.ref)}">${esc(hit.ref)}</button>
+      <div class="search-hit-sub">
+        <span class="pill">${esc(lang)}</span>
+        ${hit.versionTitle ? `<span>${esc(hit.versionTitle)}</span>` : ''}
+      </div>
+      ${hit.highlight ? `<p class="search-snippet" dir="auto">${esc(clipSnippet(hit.highlight))}</p>` : ''}
+    </article>`;
+  }).join('') + (S.searchMore
+    ? `<button class="ghost search-more" data-search-more ${S.searchBusy ? 'disabled' : ''}>${S.searchBusy ? 'Searching…' : 'Show more results'}</button>`
+    : '');
+}
+
 /* ------------------------------------------------------------------ word panel */
 
 async function showWord(word, segIndex, el) {
@@ -1802,6 +2021,27 @@ function bindEvents() {
     if (S.askResult) runAsk(S.askResult.question);
   });
 
+  // search
+  $('#search-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    goSearch($('#search-input').value);
+  });
+  $('#search-scope').addEventListener('change', () => {
+    // Two limits at once would be ambiguous: a category clears a work.
+    if ($('#search-work').value) $('#search-work').value = '';
+    readSearchFilters();
+    if (S.searchQuery) runSearch(S.searchQuery);
+  });
+  $('#search-work').addEventListener('focus', fillWorkList);
+  $('#search-this-work').addEventListener('click', () => {
+    if (!S.reader || !S.reader.title) return;
+    $('#search-work').value = S.reader.title;
+    $('#search-scope').value = '';
+    readSearchFilters();
+    if (S.searchQuery) runSearch(S.searchQuery);
+    else $('#search-input').focus();
+  });
+
   // reader controls
   $('#reader-go').addEventListener('click', () => openRef($('#reader-ref').value));
   $('#reader-ref').addEventListener('keydown', (e) => {
@@ -1969,6 +2209,12 @@ function bindEvents() {
     }
     const example = e.target.closest('[data-example]');
     if (example) { runAsk(example.dataset.example); return; }
+    const searchExample = e.target.closest('[data-search-example]');
+    if (searchExample) { goSearch(searchExample.dataset.searchExample); return; }
+    const searchMore = e.target.closest('[data-search-more]');
+    if (searchMore) { runSearch(S.searchQuery, { append: true }); return; }
+    const searchRetry = e.target.closest('[data-search-retry]');
+    if (searchRetry) { runSearch(S.searchQuery); return; }
     const exOpen = e.target.closest('[data-example-open]');
     if (exOpen) { openRef(exOpen.dataset.exampleOpen); return; }
     const settingsBtn = e.target.closest('[data-open-settings]');
@@ -2024,8 +2270,7 @@ function bindEvents() {
     if (btn.dataset.sel === 'translit') await translitSelection(ctx.text);
     if (btn.dataset.sel === 'search') {
       clearSelection();
-      setView('ask');
-      runAsk(ctx.text);
+      goSearch(ctx.text);
     }
     if (btn.dataset.sel === 'ask') {
       S.askContext = {
@@ -2155,6 +2400,7 @@ async function init() {
   }
 
   applyReadingSettings();
+  renderSearchScopes();
   renderCategoryChips();
   renderProviderOptions();
   fillSettings();

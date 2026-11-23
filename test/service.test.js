@@ -31,7 +31,7 @@ test('a Talmud daf has no verse mapping', () => {
 });
 
 /** A service with a stubbed library and a model that counts its own use. */
-function stubService({ rows, configured = true } = {}) {
+function stubService({ rows, configured = true, search: searchImpl, index: indexImpl } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sefaria-lens-test-'));
   const calls = { chat: 0, gloss: 0 };
   const llm = {
@@ -67,6 +67,8 @@ function stubService({ rows, configured = true } = {}) {
     }),
     words: async () => [],
     categoryMap: async () => ({}),
+    search: searchImpl || (async () => ({ total: 0, took: 0, hits: [] })),
+    index: indexImpl || (async (title) => ({ title, categories: [] })),
   };
   const service = createService({ appDataDir: dir, version: 'test', platform: 'test', llm, sefaria });
   return { service, calls, dir };
@@ -105,6 +107,110 @@ test('a repeated word click is answered from cache', async () => {
   assert.strictEqual(calls.gloss, 1, 'the second click must not generate again');
   assert.strictEqual(second.gloss, 'mock gloss');
   assert.strictEqual(second.cached, true);
+});
+
+test('library search passes the query and paging through to Sefaria', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    search: async (query, options) => {
+      seen.push({ query, options });
+      return {
+        total: 812,
+        took: 46,
+        hits: [{ ref: 'Genesis 1:1', lang: 'he', versionTitle: 'Miqra according to the Masorah', highlight: 'בראשית' }],
+      };
+    },
+  });
+  const out = await service.call('search', { query: '  ראשית  ', size: 20, start: 40 });
+  assert.deepStrictEqual(seen, [{ query: 'ראשית', options: { size: 20, start: 40 } }]);
+  assert.strictEqual(out.total, 812);
+  assert.strictEqual(out.hits[0].ref, 'Genesis 1:1');
+});
+
+test('an empty search never reaches the library', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    search: async (query) => { seen.push(query); return { total: 0, hits: [] }; },
+  });
+  const out = await service.call('search', { query: '   ' });
+  assert.deepStrictEqual(out, { total: 0, took: 0, hits: [] });
+  assert.strictEqual(seen.length, 0);
+});
+
+test('a huge page size or a negative offset is clamped before it is sent', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    search: async (query, options) => { seen.push(options); return { total: 3, hits: [] }; },
+  });
+  await service.call('search', { query: 'shabbat', size: 5000, start: -12 });
+  assert.deepStrictEqual(seen, [{ size: 50, start: 0 }]);
+});
+
+test('a category scope is sent as a path filter, and echoed back', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    search: async (query, options) => { seen.push(options); return { total: 2, hits: [] }; },
+  });
+  const out = await service.call('search', { query: 'shabbat', scope: 'Talmud' });
+  assert.deepStrictEqual(seen, [{ size: 14, start: 0, filters: ['Talmud'] }]);
+  assert.strictEqual(out.filter, 'Talmud');
+});
+
+test('a category the search index does not have is not sent as a filter', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    search: async (query, options) => { seen.push(options); return { total: 2, hits: [] }; },
+  });
+  const out = await service.call('search', { query: 'shabbat', scope: 'Philosophy' });
+  assert.deepStrictEqual(seen, [{ size: 14, start: 0 }]);
+  assert.strictEqual(out.filter, '');
+});
+
+test('a work is searched under the path its categories file it in', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    index: async (title) => ({ title, categories: ['Tanakh', 'Torah'] }),
+    search: async (query, options) => { seen.push(options); return { total: 3, hits: [] }; },
+  });
+  await service.call('search', { query: 'beginning', work: 'Genesis' });
+  assert.deepStrictEqual(seen[0].filters, ['Tanakh/Torah/Genesis']);
+});
+
+test('a commentary is filed under the commentary root, and beats a scope', async () => {
+  const seen = [];
+  const { service } = stubService({
+    rows: ['א׳'],
+    index: async (title) => ({ title, categories: ['Tanakh', 'Rishonim on Tanakh', 'Rashi', 'Torah'] }),
+    search: async (query, options) => { seen.push(options); return { total: 1, hits: [] }; },
+  });
+  const out = await service.call('search', { query: 'beginning', work: 'Rashi on Genesis', scope: 'Talmud' });
+  assert.deepStrictEqual(seen[0].filters,
+    ['Tanakh Commentary/Rishonim on Tanakh/Rashi/Torah/Rashi on Genesis']);
+  assert.strictEqual(out.filter, 'Tanakh Commentary/Rishonim on Tanakh/Rashi/Torah/Rashi on Genesis');
+});
+
+test('a work the library does not know is reported, not searched unfiltered', async () => {
+  const seen = [];
+  const search = async (query, options) => { seen.push(options); return { total: 0, hits: [] }; };
+  // Sefaria answers an unknown title with an index that has no categories, and
+  // a hard 404 for some forms; neither may become an unfiltered search.
+  for (const index of [
+    async () => ({ title: 'Not A Real Work', categories: [] }),
+    async () => { throw Object.assign(new Error('Not found'), { status: 404 }); },
+  ]) {
+    const { service } = stubService({ rows: ['א׳'], index, search });
+    await assert.rejects(
+      () => service.call('search', { query: 'beginning', work: 'Not A Real Work' }),
+      (err) => err.code === 'NOT_FOUND' && /Not A Real Work/.test(err.message),
+    );
+  }
+  assert.strictEqual(seen.length, 0);
 });
 
 test('without a provider the reader still opens, and offers no translation', async () => {

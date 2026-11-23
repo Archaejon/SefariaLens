@@ -22,6 +22,9 @@
         <button class="nav-btn is-active" data-view="ask">
           <span class="nav-glyph">?</span> Ask
         </button>
+        <button class="nav-btn" data-view="search">
+          <span class="nav-glyph">⌕</span> Search
+        </button>
         <button class="nav-btn" data-view="reader">
           <span class="nav-glyph">☰</span> Reader
         </button>
@@ -69,6 +72,40 @@
 
         <div class="chips" id="category-chips"></div>
         <div id="ask-output" class="ask-output"></div>
+      </section>
+
+      <!-- SEARCH --------------------------------------------------------- -->
+      <section id="view-search" class="view hidden">
+        <header class="page-head">
+          <h1>Search the library</h1>
+          <p class="sub">Full-text search over everything Sefaria publishes, in Hebrew or English. Results are passages: open one to read it with its translation, word tools, and commentaries.</p>
+        </header>
+
+        <form id="search-form" class="search-form">
+          <div class="askbar">
+            <input id="search-input" type="text" autocomplete="off" spellcheck="false"
+                   aria-label="Search the Sefaria library"
+                   placeholder="עולם הבא, love your neighbor, Shabbat candles…">
+            <button type="submit" class="primary" id="search-go">Search</button>
+          </div>
+          <div class="search-scope">
+            <label class="scope-field">
+              <span class="version-label">Limit to</span>
+              <select id="search-scope" aria-label="Limit the search to a category"></select>
+            </label>
+            <label class="scope-field scope-work">
+              <span class="version-label">Work</span>
+              <input id="search-work" type="text" list="search-work-list" autocomplete="off" spellcheck="false"
+                     aria-label="Limit the search to one work"
+                     placeholder="All works — or one: Genesis, Berakhot, Rashi on Genesis…">
+            </label>
+            <button type="button" id="search-this-work" class="ghost small hidden">This work</button>
+            <datalist id="search-work-list"></datalist>
+          </div>
+        </form>
+
+        <div id="search-meta" class="search-meta" role="status"></div>
+        <div id="search-results" class="search-results"></div>
       </section>
 
       <!-- READER --------------------------------------------------------- -->

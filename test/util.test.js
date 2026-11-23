@@ -75,6 +75,16 @@ test('parses Sefaria search ids', () => {
     { ref: 'Rashi on Psalms 18:2:1', versionTitle: 'The Judaica Press Tanach', lang: 'en' },
   );
   assert.strictEqual(parseSearchId('Genesis 1:1').ref, 'Genesis 1:1');
+  // A version title with its own parentheses used to defeat the split, leaving
+  // the version in the ref so the result could not be opened.
+  assert.deepStrictEqual(
+    parseSearchId('Genesis 1:1 (The Holy Scriptures: A New Translation (JPS 1917) [en])'),
+    { ref: 'Genesis 1:1', versionTitle: 'The Holy Scriptures: A New Translation (JPS 1917)', lang: 'en' },
+  );
+  assert.deepStrictEqual(
+    parseSearchId('Berakhot 2a (Talmud Bavli. German trans. [de])'),
+    { ref: 'Berakhot 2a', versionTitle: 'Talmud Bavli. German trans.', lang: 'de' },
+  );
 });
 
 test('clip respects a budget', () => {

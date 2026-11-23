@@ -126,9 +126,12 @@ function isHebrew(s) {
  */
 function parseSearchId(id) {
   if (!id) return null;
-  const m = String(id).match(/\s*\(([^()]*)\[(he|en)\]\s*\)\s*$/);
+  // The version title can itself contain parentheses — "The Holy Scriptures:
+  // A New Translation (JPS 1917)" — so the suffix is matched from the end, and
+  // the tag is any language, not only Hebrew or English.
+  const m = String(id).match(/^(.*?)\s*\((.+)\[([a-z]{2,3})\]\s*\)\s*$/);
   if (m) {
-    return { ref: String(id).slice(0, m.index).trim(), versionTitle: m[1].trim(), lang: m[2] };
+    return { ref: m[1].trim(), versionTitle: m[2].trim(), lang: m[3] };
   }
   return { ref: String(id).trim(), versionTitle: '', lang: isHebrew(id) ? 'he' : 'en' };
 }
