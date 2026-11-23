@@ -4,7 +4,7 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 
 ## Current state
 
-- **Version:** 1.0.10 (tag `v1.0.10`). `main` is two commits ahead of the tag: library search, and the audit hardening. Not yet released as 1.0.11.
+- **Version:** 1.0.10 (tag `v1.0.10`). `main` is ahead of the tag by the release automation, library search, the audit hardening and this journal. Not yet released as 1.0.11.
 - **Remotes:** `github` → https://github.com/Archaejon/SefariaLens (public, pushes work). `origin` → Codeberg `Archaejon/SefariaLens`; fetch and push fail from this machine with `Permission denied (publickey)`.
 - **Tests:** 216 passing. This machine has no Node on the PATH (`.tools/node` and `node_modules/electron` are Windows binaries), so run them in Docker:
   `docker run --rm -v "$PWD":/app:ro -w /app node:22-bookworm-slim node --test test/*.test.js`
