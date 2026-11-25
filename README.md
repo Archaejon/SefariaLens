@@ -18,7 +18,7 @@ Texts, translations, links, and lexicon entries come from the public Sefaria API
 
 ## Run it
 
-**Prebuilt app** (Windows x64): download `SefariaLens-1.0.10-portable.exe` from the **Releases** page of this repository. Double-click it; no installation or admin rights are required. The portable build unpacks to a temp folder at launch. Each release publishes `SHA256SUMS.txt` next to the exe (`sha256sum -c SHA256SUMS.txt`).
+**Prebuilt app** (Windows x64): download `SefariaLens-1.0.11-portable.exe` from the **Releases** page of this repository. Double-click it; no installation or admin rights are required. The portable build unpacks to a temp folder at launch. Each release publishes `SHA256SUMS.txt` next to the exe (`sha256sum -c SHA256SUMS.txt`).
 
 **From source** (Node 18+):
 
@@ -27,7 +27,7 @@ npm install
 npm start          # Electron window
 npm run dev        # browser harness at http://127.0.0.1:4173
 npm test           # node:test suites, no network or API key needed
-npm run dist       # build dist/SefariaLens-1.0.10-portable.exe
+npm run dist       # build dist/SefariaLens-1.0.11-portable.exe
 ```
 
 `npm run dev` serves the same UI and RPC service over HTTP, which is handy for working on the interface without rebuilding the desktop app. The test suite uses a bundled mock OpenAI-compatible server (`test/mock-llm.js`), so no provider key is required to run it.
