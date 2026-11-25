@@ -1,0 +1,113 @@
+# The GitHub counterpart of .woodpecker.yml: every push and pull request runs
+# the test suite, and a tag v<version> additionally packages the Windows
+# portable exe and publishes it as a release. A manual run packages the exe
+# too, but keeps it as a workflow artifact instead of releasing it, so the
+# build can be checked without cutting a version.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A release in progress is never cancelled halfway through an upload.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Tests run on Node alone; the Electron binary is not needed.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # No linter is configured; this at least stops a file that does not
+      # parse from reaching main, including the renderer, which no test loads.
+      - name: Syntax check
+        run: |
+          git ls-files '*.js' | while read -r file; do node --check "$file"; done
+      - run: npm test
+
+  build-portable:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # A Windows runner builds the NSIS-based portable exe natively, so there is
+    # no Wine layer between the build and the thing users run.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The artefact is named after package.json, so a tag that disagrees with
+      # it would publish a file whose name lies about its contents.
+      - name: Check the tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_REF_NAME" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          ls -l SefariaLens-*-portable.exe
+          # Git Bash marks binary mode with "*"; write the plain two-space form
+          # every sha256sum -c accepts.
+          sha256sum SefariaLens-*-portable.exe | sed 's/ \*/  /' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Keep the build (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SefariaLens-portable
+          path: |
+            dist/SefariaLens-*-portable.exe
+            dist/SHA256SUMS.txt
+          retention-days: 7
+
+      # The annotated tag already carries the release notes, so they are taken
+      # from there instead of being duplicated in a file that drifts.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # checkout leaves a lightweight stand-in for the tag; fetch the real one.
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          notes=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")
+          if [ -z "$notes" ]; then notes=$(git log -1 --format='%B'); fi
+          printf '%s\n' "$notes" > dist/release-notes.md
+          # Re-running a tag build repairs a half-finished release rather than
+          # failing because it already exists.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/SefariaLens-*-portable.exe dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/SefariaLens-*-portable.exe dist/SHA256SUMS.txt \
+              --title "Sefaria Lens $GITHUB_REF_NAME" --notes-file dist/release-notes.md --verify-tag
+          fi

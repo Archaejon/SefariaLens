@@ -51,10 +51,16 @@ Two invariants are easy to break and worth watching in review:
 ## Pull requests
 
 Keep a change to one concern, keep `npm test` green, and say what you measured
-if the change is about speed or resource use. There is no linter to satisfy; a
-reviewer will read the diff.
+if the change is about speed or resource use. There is no linter to satisfy beyond CI's
+syntax check; a reviewer will read the diff.
 
 ## Continuous integration
+
+On GitHub, [.github/workflows/ci.yml](.github/workflows/ci.yml) runs the test
+suite on every push to `main` and every pull request, and a `v<version>` tag
+also packages the portable exe on a Windows runner and publishes the release.
+It needs no setup and no secret. A manual run from the Actions tab builds the
+exe without releasing it.
 
 Codeberg builds this repository with Woodpecker: pushes and pull requests run
 the test suite on Node 22, and tags additionally package the Windows portable

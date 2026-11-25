@@ -352,6 +352,22 @@ Questions go to your selected AI provider; passage text from Sefaria is included
 
 ## Continuous integration
 
+Two pipelines do the same job, one per forge: [.github/workflows/ci.yml](.github/workflows/ci.yml) on GitHub and [.woodpecker.yml](.woodpecker.yml) on Codeberg.
+
+### GitHub Actions
+
+Nothing needs enabling: the workflow runs as soon as it is on `main`, and the release step uses the token GitHub gives every run, so there is no secret to add.
+
+| Trigger | Jobs | What it proves |
+| --- | --- | --- |
+| push to `main`, pull request | `test` | `npm ci` resolves the lockfile, every tracked `.js` file parses, and all `node:test` suites pass on Node 22 |
+| tag `v<version>` | `test`, `build-portable` | the tag matches `package.json`, the portable exe packages on a Windows runner, and the exe plus `SHA256SUMS.txt` reach the GitHub release, with the tag annotation as its notes |
+| manual run (**Actions → CI → Run workflow**) | `test`, `build-portable` | the same build, kept for seven days as a workflow artifact instead of being released |
+
+`git tag -a v1.0.11 -F notes.md && git push github v1.0.11` is the whole release on GitHub. Re-running a tag build replaces the assets of an existing release. `npm run release` still pushes to `origin` and watches Woodpecker; use `--no-push` and push the tag to GitHub by hand until it learns about Actions.
+
+### Woodpecker on Codeberg
+
 The pipeline lives in [.woodpecker.yml](.woodpecker.yml) for [Woodpecker](https://woodpecker-ci.org), which Codeberg runs at [ci.codeberg.org](https://ci.codeberg.org). Codeberg does not build a repository until its owner asks for it, so a checkout with a `.woodpecker.yml` and no activation produces no builds at all — which is exactly what an empty commit-status list and a 404 on the badge mean. Activating it is a set of account actions, not a commit:
 
 1. **Request access.** The instance is invitation-only to keep its shared runners from being abused. Open a request through [Codeberg e.V.'s form](https://codeberg.org/Codeberg-e.V./requests/issues/new?template=ISSUE_TEMPLATE%2fWoodpecker-CI.yaml); a volunteer reviews it against the published criteria. Approval is per account, not per repository, so this happens once.
