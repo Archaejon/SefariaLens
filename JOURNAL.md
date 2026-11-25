@@ -4,7 +4,7 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 
 ## Current state
 
-- **Version:** 1.0.10 (tag `v1.0.10`). `main` is ahead of the tag by the release automation, library search, the audit hardening and this journal. Not yet released as 1.0.11.
+- **Version:** 1.0.11 (tag `v1.0.11`, released 2026-11-25 on GitHub: https://github.com/Archaejon/SefariaLens/releases/tag/v1.0.11). `main` is at the release plus journal updates. Codeberg still has only 1.0.10.
 - **Remotes:** `github` → https://github.com/Archaejon/SefariaLens (public, pushes work). `origin` → Codeberg `Archaejon/SefariaLens`; fetch and push fail from this machine with `Permission denied (publickey)`.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) runs a syntax check and the tests on every push to `main` and pull request; a `v<version>` tag also builds the portable exe on a Windows runner and publishes a GitHub release; a manual run builds the exe as a 7-day artifact. No secret needed. The Woodpecker file is kept for Codeberg.
 - **Tests:** 216 passing. This machine has no Node on the PATH (`.tools/node` and `node_modules/electron` are Windows binaries), so run them in Docker:
@@ -13,7 +13,6 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 
 ## Open items
 
-- Release 1.0.11 (search + hardening). GitHub can now build it: bump the version, tag, `git push github main v1.0.11`. The tag/release path of the workflow has not run yet — only the test and manual-build paths have.
 - `npm run release` (`tools/release.js`, `tools/watch-release.js`) still pushes to `origin` and watches Woodpecker. Until it learns about GitHub, use `--no-push` and push the tag by hand, or bump and tag manually.
 - No real linter yet; CI only runs `node --check` over tracked `.js` files.
 - Audit findings not addressed: `renderer/app.js` is one 2,400-line file with 49 `innerHTML` sites and no tests; the 300-line smoke test lives in `electron/main.js`.
@@ -23,6 +22,13 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 - Product ideas, by value for effort: bookmarks/notes/saved answers; calendar entry points (parasha, Daf Yomi, 929); export to Markdown/PDF; offline pinning of works; Linux and macOS builds; stress marks in transliteration; semantic retrieval for Ask.
 
 ## Sessions
+
+### 2026-11-25 — release 1.0.11
+
+- Bumped `package.json`, the lockfile and the two README exe references by hand (the release script cannot push to GitHub yet), committed `Release 1.0.11` (`dd469fb`), tagged `v1.0.11` with the notes as the annotation, and pushed both to `github`.
+- The tag build passed end to end, which was the one untested path of the workflow: tag check, Windows packaging, checksums, release. The release carries `SefariaLens-1.0.11-portable.exe` (74.4 MB) and `SHA256SUMS.txt`; the digest GitHub reports for the exe matches the checksum file (`28d29d70…2935645`).
+- Not done: the exe itself was not downloaded or launched, so the packaged app has not been smoke-tested. It is unsigned, as before.
+- Next in the proposed order: study persistence (bookmarks, notes, saved answers) as 1.1.
 
 ### 2026-11-25 — GitHub Actions
 
