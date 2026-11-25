@@ -16,7 +16,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # The event is part of the group so a manual run on main does not cancel the
+  # push build of the same commit.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   # A release in progress is never cancelled halfway through an upload.
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
