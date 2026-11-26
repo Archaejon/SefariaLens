@@ -7,7 +7,7 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 - **Version:** 1.0.11 (tag `v1.0.11`, released 2026-11-25 on GitHub: https://github.com/Archaejon/SefariaLens/releases/tag/v1.0.11). `main` is at the release plus journal updates. Codeberg still has only 1.0.10.
 - **Remotes:** `github` → https://github.com/Archaejon/SefariaLens (public, pushes work). `origin` → Codeberg `Archaejon/SefariaLens`; fetch and push fail from this machine with `Permission denied (publickey)`.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) runs a syntax check and the tests on every push to `main` and pull request; a `v<version>` tag also builds the portable exe on a Windows runner and publishes a GitHub release; a manual run builds the exe as a 7-day artifact. No secret needed. The Woodpecker file is kept for Codeberg.
-- **Unreleased on disk (not committed):** the notebook feature for 1.1 — `src/study.js`, `renderer/notebook.js`, `test/study.test.js`, plus edits to the service, renderer, styles, README.
+- **Unreleased on `main`:** the notebook feature for 1.1 (commit `ce7e89a`, pushed to GitHub). Version is still 1.0.11.
 - **Tests:** 225 passing. This machine has no Node on the PATH (`.tools/node` and `node_modules/electron` are Windows binaries), so run them in Docker:
   `docker run --rm -v "$PWD":/app:ro -w /app node:22-bookworm-slim node --test test/*.test.js`
 - **Pushing to GitHub:** the `github` remote uses the SSH host alias `github-sefarialens` (in `~/.ssh/config`), which selects the deploy key `~/.ssh/sefarialens_github_ed25519`. That key is a write deploy key on this one repository. The machine's other GitHub key belongs to a different repository and cannot push here.
@@ -32,7 +32,7 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 - New `renderer/notebook.js`, loaded before `app.js` and sharing its globals — the first piece of UI to live outside `app.js`. Reader: ☆ and ✎ per segment, inline note editor, note shown under the verse. Ask: Save to notebook (hidden for the no-model fallback) and per-source bookmark. Notebook view: filters, text filter, edit note, two-step remove, Copy as Markdown, open-with-focus on the saved verse.
 - Decisions: a verse is keyed by its own ref (`segRefs`), a daf line by `<daf>:<n>`; export is clipboard-only for now; `commentaryControlsHtml` was split so the commentary button shares a row with the new tools.
 - Checked in the browser harness (run in Docker via `.claude/launch.json`, which is git-ignored): bookmark, note, daf segment, notebook filters, edit, remove, focus-on-open, source bookmark, light theme. The same session confirmed the harness guard in a real browser (a `text/plain` POST gets 403, the page itself works).
-- Not committed, not released. Version is still 1.0.11.
+- Committed as `ce7e89a` and pushed to `github`; not released. Version is still 1.0.11.
 
 ### 2026-11-25 — release 1.0.11
 
