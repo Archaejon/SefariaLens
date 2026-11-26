@@ -13,6 +13,7 @@ A desktop study app that reads the [Sefaria](https://www.sefaria.org) library an
 7. **English where Sefaria has none** — when a segment of an edition is published without an English translation, the app generates one for the gaps, labels it clearly as an AI translation, and caches it.
 8. **Commentaries, verse by verse** — every verse of a primary source carries its own chooser listing only the works Sefaria links to *that verse* (Rashi, Ramban, Ibn Ezra, Midrash, Targum, halakhic codes, later thought as relevant), grouped and ordered the way Sefaria's own list is. Picking one shows it under that verse alone, Hebrew and English with its license. The whole commentary layer can be switched off from the reader bar.
 9. **Read your way** — Hebrew and its translation sit side by side, verse by verse, with the original on the right and the translation on the left, so you read across rather than down. Hebrew, transliteration, translation, and commentaries are independent layers: turning Hebrew and Transliteration off gives an English-only page, including the answer cards, and the translation then takes the full width. A **Text** selector shows 10, 25, 50, or 100 segments at once (or the whole section), with **Show more** for the rest.
+10. **A notebook of your own** — bookmark any verse, write a note under it, and keep an answer from Ask with its sources. Everything is listed in a **Notebook** view, filtered by kind or by text, and copies out as Markdown. It is stored on your computer and never sent anywhere.
 
 Texts, translations, links, and lexicon entries come from the public Sefaria API. The AI layer is provider-agnostic and optional for reading (required for Q&A and translation).
 
@@ -210,6 +211,16 @@ Choosing one fetches that work at that verse and shows it directly beneath the v
 
 Texts that are not addressed by chapter and verse (a Talmud daf, whose segments are its lines) get one chooser for the passage above the text instead, because there is no per-verse ref to link against. Works that are themselves commentary show no chooser.
 
+## The notebook
+
+Every verse in the reader carries two small controls beside its commentary button: **☆** bookmarks it and **✎** opens a note under it (Ctrl+Enter saves, Esc cancels). A saved note stays under the verse whenever that passage is open; clicking it edits it. A verse has one entry however it was reached, so a bookmark made in Genesis 1 is the same one seen at Genesis 1:3. A line of a Talmud daf has no verse ref of its own and is saved as a numbered segment of the daf (`Berakhot 2a:2`).
+
+In **Ask**, an answer written by a model has **Save to notebook**, which keeps the question, the answer, its caveats and each source with the reason it was chosen; every source card has its own **☆ Bookmark**. An unranked fallback list is not an answer and offers only the per-source bookmarks.
+
+**Notebook** in the sidebar lists it all, most recently changed first, with filters for bookmarks, notes and answers and a text filter over references, text and notes. Opening a passage returns to the chapter it was saved from with the verse brought into view. **Copy as Markdown** puts the whole notebook on the clipboard. Removing an entry asks once, because a note cannot be recovered.
+
+The notebook is one file, `notebook.json`, in the app's data folder. It is not a cache: nothing in it expires, it is written to a temporary file and renamed so a crash cannot leave half a notebook, and a file that cannot be read is set aside as `notebook.unreadable-<time>.json` instead of being overwritten.
+
 ## Transliteration
 
 `src/translit.js` is a rules engine over pointed Hebrew. It parses letter clusters (consonant + niqqud, dagesh, shin/sin dot, cantillation ignored), resolves matres lectionis, shva na/nach, dagesh qal/forte, furtive patach, and qamatz qatan, then applies a pronunciation profile:
@@ -329,9 +340,10 @@ src/schemas.js       JSON schemas the model's answers must fit
 src/translit.js      Hebrew → Latin rules engine, seven profiles
 src/divine-name.js   Adonai in liturgy, HaShem elsewhere, from a work's metadata
 src/settings.js      persisted settings; environment overrides stay out of the file
+src/study.js         the notebook: bookmarks, notes and saved answers in one local file
 src/cache.js         disk + memory cache, pruned by age and count
 src/util.js          HTML/footnote stripping, segment normalisation, ref parsing
-renderer/            plain HTML/CSS/JS UI (no build step)
+renderer/            plain HTML/CSS/JS UI (no build step); notebook.js holds the notebook's UI
 tools/devserver.js   browser harness exposing the same RPC over HTTP, same-origin only
 tools/shoot.js       offscreen Electron screenshot harness
 tools/release.js     cut a version tag; tools/watch-release.js follows its pipeline
@@ -348,7 +360,7 @@ Transliteration and the app's own code are original to this project and released
 
 ## Privacy
 
-Questions go to your selected AI provider; passage text from Sefaria is included in the prompt. Sefaria receives only text/search requests. Nothing else leaves the machine. Responses are cached locally under the Electron user-data directory; entries older than thirty days are removed at startup, and deleting that folder clears the rest.
+Questions go to your selected AI provider; passage text from Sefaria is included in the prompt. Sefaria receives only text/search requests. Nothing else leaves the machine; the notebook in particular is never sent to Sefaria or to a model. Responses are cached locally under the Electron user-data directory; entries older than thirty days are removed at startup, and deleting that folder clears the rest.
 
 ## Continuous integration
 

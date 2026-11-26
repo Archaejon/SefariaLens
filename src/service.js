@@ -9,6 +9,7 @@ const { LLM, PROVIDERS } = require('./llm.js');
 const { Settings } = require('./settings.js');
 const { ask, gloss, translateSelection, translateSegments, CATEGORIES, isPrimaryWork } = require('./answer.js');
 const { Cache } = require('./cache.js');
+const { Study } = require('./study.js');
 const { transliterate, wordInfo, STYLE_INFO } = require('./translit.js');
 const { readingFor } = require('./divine-name.js');
 const { buildChapters } = require('./chapters.js');
@@ -99,6 +100,7 @@ function createService({
 }) {
   fs.mkdirSync(appDataDir, { recursive: true });
   const settings = new Settings(path.join(appDataDir, 'settings.json'), { encrypt, decrypt });
+  const study = new Study(path.join(appDataDir, 'notebook.json'));
   const sefaria = sefariaImpl || new Sefaria({ cacheDir: path.join(appDataDir, 'cache') });
   const llm = llmImpl || new LLM({ getSettings: () => settings.get() });
   const translationCache = new Cache(path.join(appDataDir, 'cache'), { ttlMs: 1000 * 60 * 60 * 24 * 30 });
@@ -618,6 +620,15 @@ function createService({
       };
     },
 
+    // The notebook: bookmarks, notes and kept answers. Local only — nothing
+    // here is sent to Sefaria or to a model.
+    'study.list': async () => ({ items: study.list() }),
+    'study.savePassage': async (params = {}) => ({ item: study.savePassage(params) }),
+    'study.saveAnswer': async (params = {}) => ({ item: study.saveAnswer(params) }),
+    'study.setNote': async (params = {}) => ({ item: study.setNote(params) }),
+    'study.remove': async (params = {}) => study.remove(params),
+    'study.export': async () => study.exportMarkdown(),
+
     'suggestions': async () => ([
       'What does the Torah say about caring for strangers?',
       'How do the sources understand "love your neighbor as yourself"?',
@@ -652,7 +663,7 @@ function createService({
     return cancelled;
   }
 
-  return { call, methods, settings, sefaria, llm, withTranslit, appDataDir, abortAll };
+  return { call, methods, settings, study, sefaria, llm, withTranslit, appDataDir, abortAll };
 }
 
 module.exports = { createService, segmentRefsFor };

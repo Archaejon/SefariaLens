@@ -7,21 +7,32 @@ Working log for Sefaria Lens. Read it at the start of every session; add an entr
 - **Version:** 1.0.11 (tag `v1.0.11`, released 2026-11-25 on GitHub: https://github.com/Archaejon/SefariaLens/releases/tag/v1.0.11). `main` is at the release plus journal updates. Codeberg still has only 1.0.10.
 - **Remotes:** `github` → https://github.com/Archaejon/SefariaLens (public, pushes work). `origin` → Codeberg `Archaejon/SefariaLens`; fetch and push fail from this machine with `Permission denied (publickey)`.
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`) runs a syntax check and the tests on every push to `main` and pull request; a `v<version>` tag also builds the portable exe on a Windows runner and publishes a GitHub release; a manual run builds the exe as a 7-day artifact. No secret needed. The Woodpecker file is kept for Codeberg.
-- **Tests:** 216 passing. This machine has no Node on the PATH (`.tools/node` and `node_modules/electron` are Windows binaries), so run them in Docker:
+- **Unreleased on disk (not committed):** the notebook feature for 1.1 — `src/study.js`, `renderer/notebook.js`, `test/study.test.js`, plus edits to the service, renderer, styles, README.
+- **Tests:** 225 passing. This machine has no Node on the PATH (`.tools/node` and `node_modules/electron` are Windows binaries), so run them in Docker:
   `docker run --rm -v "$PWD":/app:ro -w /app node:22-bookworm-slim node --test test/*.test.js`
 - **Pushing to GitHub:** the `github` remote uses the SSH host alias `github-sefarialens` (in `~/.ssh/config`), which selects the deploy key `~/.ssh/sefarialens_github_ed25519`. That key is a write deploy key on this one repository. The machine's other GitHub key belongs to a different repository and cannot push here.
 
 ## Open items
 
 - `npm run release` (`tools/release.js`, `tools/watch-release.js`) still pushes to `origin` and watches Woodpecker. Until it learns about GitHub, use `--no-push` and push the tag by hand, or bump and tag manually.
+- The packaged exe is never launched by anyone before release. `electron/main.js` already has a headless smoke mode (`SEFARIA_LENS_SMOKE=1`); running it against the built exe in the Windows CI job would close that gap (it calls the live Sefaria API, so allow for a flaky network).
+- Electron is pinned at `^33`, which dates from late 2024; check the current supported line and upgrade.
 - No real linter yet; CI only runs `node --check` over tracked `.js` files.
 - Audit findings not addressed: `renderer/app.js` is one 2,400-line file with 49 `innerHTML` sites and no tests; the 300-line smoke test lives in `electron/main.js`.
-- The dev-harness request guard is covered by tests only; it has not been tried in a real browser since the change.
 - Decide which remote is canonical. README, CONTRIBUTING and the release tools all point at Codeberg.
 - `dist/` (980 MB of old exes) and `.tools/` (272 MB) are git-ignored local clutter.
-- Product ideas, by value for effort: bookmarks/notes/saved answers; calendar entry points (parasha, Daf Yomi, 929); export to Markdown/PDF; offline pinning of works; Linux and macOS builds; stress marks in transliteration; semantic retrieval for Ask.
+- Notebook follow-ups: save the Markdown export to a file (needs a save dialog in Electron; today it is clipboard only); saving an AI-written answer was not exercised in the browser (no provider on this machine), only through the store tests; the packaged Electron app has not been run with the feature; no notebook step in the smoke test; no README screenshot.
+- Product ideas, by value for effort: calendar entry points (parasha, Daf Yomi, 929); export to Markdown/PDF; offline pinning of works; Linux and macOS builds; stress marks in transliteration; semantic retrieval for Ask.
 
 ## Sessions
+
+### 2026-11-26 — notebook (bookmarks, notes, saved answers) for 1.1
+
+- New store `src/study.js` → `notebook.json` in the app data folder, exposed as `study.list / savePassage / saveAnswer / setNote / remove / export`. One entry per passage ref holding both the bookmark flag and the note; an entry with neither is deleted. Atomic writes; an unreadable file is renamed aside, never overwritten. Limits: 5,000 entries, 10,000-character notes.
+- New `renderer/notebook.js`, loaded before `app.js` and sharing its globals — the first piece of UI to live outside `app.js`. Reader: ☆ and ✎ per segment, inline note editor, note shown under the verse. Ask: Save to notebook (hidden for the no-model fallback) and per-source bookmark. Notebook view: filters, text filter, edit note, two-step remove, Copy as Markdown, open-with-focus on the saved verse.
+- Decisions: a verse is keyed by its own ref (`segRefs`), a daf line by `<daf>:<n>`; export is clipboard-only for now; `commentaryControlsHtml` was split so the commentary button shares a row with the new tools.
+- Checked in the browser harness (run in Docker via `.claude/launch.json`, which is git-ignored): bookmark, note, daf segment, notebook filters, edit, remove, focus-on-open, source bookmark, light theme. The same session confirmed the harness guard in a real browser (a `text/plain` POST gets 403, the page itself works).
+- Not committed, not released. Version is still 1.0.11.
 
 ### 2026-11-25 — release 1.0.11
 

@@ -67,6 +67,16 @@ const S = {
   translateBusy: false,
   translateReq: '',
   autoTranslate: false,
+  // The notebook (renderer/notebook.js): a copy of the saved entries, the
+  // passages among them by ref, and which note is being written where.
+  study: [],
+  studyByRef: new Map(),
+  noteOpen: '',
+  noteDraft: '',
+  nbFilter: 'all',
+  nbQuery: '',
+  nbEdit: '',
+  nbConfirm: '',
 };
 
 const esc = (s) => String(s == null ? '' : s)
@@ -149,6 +159,12 @@ function setView(view) {
   $$('.nav-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.view === view));
   if (view === 'settings') fillSettings();
   if (view === 'library') ensureLibrary();
+  if (view === 'notebook') {
+    S.nbEdit = '';
+    S.nbConfirm = '';
+    if ($('#nb-search')) $('#nb-search').value = S.nbQuery;
+    renderNotebook();
+  }
   if (view === 'search') {
     renderSearchScopes();
     updateThisWork();
@@ -408,7 +424,7 @@ function renderAnswer(result) {
       <p class="answer-text">${esc(result.answer)}</p>
       ${result.caveats ? `<p class="caveat">${esc(result.caveats)}</p>` : ''}
       ${meta.ai === false ? `<p class="caveat">Ranking was not AI-assisted, so these are raw relevance results. <button class="ghost small" data-open-settings>Add a provider</button></p>` : ''}
-      <div class="answer-meta">${bits.join('')}</div>
+      <div class="answer-meta">${bits.join('')}<span class="answer-save">${saveAnswerButtonHtml(result)}</span></div>
     </div>`;
 
   const sources = result.sources.map((src, i) => {
@@ -447,6 +463,7 @@ function renderAnswer(result) {
         <footer class="source-foot">
           <button class="ghost small" data-open-ref="${esc(src.ref)}">Open in reader</button>
           <button class="ghost small" data-copy-ref="${esc(src.ref)}">Copy citation</button>
+          ${sourceBookmarkHtml(src, i)}
           <span class="license" title="${esc(versionTitle)}">${esc(versionTitle)}${license ? ` · ${esc(license)}` : ''}</span>
         </footer>
       </article>`;
@@ -723,17 +740,21 @@ function selectedCommentaryHtml(index) {
   </div>`;
 }
 
-function commentaryControlsHtml(index) {
+function commentaryButtonHtml(index) {
   const key = commKey(index);
   const selected = S.verseSel[key];
   const open = S.verseOpen === key;
-  return `<div class="seg-comm-controls">
-    <button class="seg-comm-btn${open ? ' is-active' : ''}${selected ? ' has-selection' : ''}" data-vc-open="${index}"
+  return `<button class="seg-comm-btn${open ? ' is-active' : ''}${selected ? ' has-selection' : ''}" data-vc-open="${index}"
       title="Commentaries on ${esc(commRef(S.reader, index))}">
       <span class="sc-mark" aria-hidden="true">✦</span>
       <span>${selected ? esc(selected.title || selected.work) : 'Commentaries'}</span>
-    </button>
-    ${open ? commentaryPanelHtml(index) : ''}
+    </button>`;
+}
+
+function commentaryControlsHtml(index) {
+  return `<div class="seg-comm-controls">
+    ${commentaryButtonHtml(index)}
+    ${S.verseOpen === commKey(index) ? commentaryPanelHtml(index) : ''}
   </div>`;
 }
 
@@ -792,6 +813,8 @@ document.addEventListener('click', (e) => {
 function renderReaderBody() {
   const data = S.reader;
   if (!data) return;
+  // A redraw for any other reason must not throw away a note being typed.
+  keepNoteDraft();
   const rows = data.rows || [];
   const shown = S.pageSize > 0
     ? Math.min(Math.max(S.readerShown || S.pageSize, S.pageSize), rows.length)
@@ -822,7 +845,12 @@ function renderReaderBody() {
             ${hasTranslit ? `<p class="seg-translit">${esc(translit)}</p>` : ''}
           </div>` : ''}
           ${hasEn ? `<div class="seg-col seg-col-en"><p class="seg-en" dir="${enDir}">${esc(row.en)}</p></div>` : ''}
-          ${perVerse ? `<div class="seg-extra">${commentaryControlsHtml(i)}${selectedCommentaryHtml(i)}</div>` : ''}
+          <div class="seg-extra">
+            <div class="seg-actions">${perVerse ? commentaryButtonHtml(i) : ''}${studyToolsHtml(i)}</div>
+            ${perVerse && S.verseOpen === commKey(i) ? commentaryPanelHtml(i) : ''}
+            ${segNoteHtml(i)}
+            ${perVerse ? selectedCommentaryHtml(i) : ''}
+          </div>
         </div>
       </div>`;
   }).join('');
@@ -946,7 +974,11 @@ function renderLoadedText(data, { recent = true } = {}) {
   S.readerShown = S.pageSize > 0 ? S.pageSize : 0;
   // Reopening the same passage keeps any commentary already chosen; only a
   // different passage starts from a clean slate.
-  if (previous !== data.ref) resetCommentaryState();
+  if (previous !== data.ref) {
+    resetCommentaryState();
+    S.noteOpen = '';
+    S.noteDraft = '';
+  }
   renderReader();
   $('#reader-external').onclick = () => api.openExternal(`https://www.sefaria.org/${enc(data.ref.replace(/ /g, '_'))}`);
   if (recent) addRecent(data.ref);
@@ -959,7 +991,7 @@ function renderLoadedText(data, { recent = true } = {}) {
   }
 }
 
-async function openRef(ref, { recent = true, version } = {}) {
+async function openRef(ref, { recent = true, version, focus = '' } = {}) {
   const target = String(ref || '').trim();
   if (!target) return;
   const token = ++openSeq;
@@ -976,6 +1008,8 @@ async function openRef(ref, { recent = true, version } = {}) {
     // A later Open wins: an earlier response must not overwrite it.
     if (token !== openSeq) return;
     renderLoadedText(data, { recent });
+    // Opened from the notebook: show the saved verse, not the top of the chapter.
+    if (focus) focusSegment(focus);
   } catch (err) {
     $('#reader-text').innerHTML = `
       <div class="error-card">
@@ -2383,7 +2417,7 @@ async function init() {
   if (api.onEvent) api.onEvent(handleAiEvent);
 
   try {
-    const [settings, info] = await Promise.all([api.rpc('settings.get'), api.rpc('app.info')]);
+    const [settings, info] = await Promise.all([api.rpc('settings.get'), api.rpc('app.info'), loadStudy()]);
     S.settings = settings;
     S.info = info;
     S.style = settings.style || 'modern';
