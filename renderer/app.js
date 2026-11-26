@@ -175,6 +175,9 @@ function setView(view) {
     $('#reader-text').innerHTML = '';
     $('#reader-meta').innerHTML = '';
   }
+  // Stars, notes and "saved" buttons may have changed in the Notebook view.
+  if (view === 'reader' && S.reader) renderReaderBody();
+  if (view === 'ask' && S.askResult && !S.busy && $('#ask-output .answer-card')) renderAnswer(S.askResult);
   $('#main')?.scrollTo?.(0, 0);
   document.querySelector('.main').scrollTop = 0;
 }
@@ -995,6 +998,8 @@ async function openRef(ref, { recent = true, version, focus = '' } = {}) {
   const target = String(ref || '').trim();
   if (!target) return;
   const token = ++openSeq;
+  // Reloading the same passage (another translation, say) keeps an open note.
+  keepNoteDraft();
   setView('reader');
   $('#reader-meta').innerHTML = '';
   // The old passage's commentary must not stay clickable while a new one loads.

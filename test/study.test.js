@@ -161,3 +161,47 @@ test('the service exposes the notebook and keeps it in the app data folder', asy
     (err) => err.code === 'BAD_REQUEST',
   );
 });
+
+test('a notebook that exists but cannot be read is never written over', () => {
+  const { dir, now } = notebook();
+  // A directory where the file should be: reading it fails, and not with ENOENT.
+  const file = path.join(dir, 'locked.json');
+  fs.mkdirSync(file);
+  const study = new Study(file, { now });
+  assert.deepStrictEqual(study.list(), []);
+  assert.throws(
+    () => study.savePassage({ ref: 'Genesis 1:1', bookmarked: true }),
+    (err) => err.code === 'UNREADABLE' && /locked\.json/.test(err.message),
+  );
+  assert.throws(() => study.exportMarkdown(), (err) => err.code === 'UNREADABLE');
+  assert.ok(fs.statSync(file).isDirectory(), 'what was there is untouched');
+
+  // Once it can be read again, the notebook works without a restart.
+  fs.rmdirSync(file);
+  fs.writeFileSync(file, JSON.stringify({ version: 1, items: [] }));
+  assert.ok(study.savePassage({ ref: 'Genesis 1:1', bookmarked: true }));
+});
+
+test('a change that cannot be written is undone', () => {
+  const { study, file } = notebook();
+  study.savePassage({ ref: 'Genesis 1:1', bookmarked: true, note: 'kept' });
+  // Block the temporary file the next save needs.
+  fs.mkdirSync(`${file}.tmp`);
+  assert.throws(() => study.savePassage({ ref: 'Genesis 1:1', note: 'lost?' }));
+  assert.throws(() => study.savePassage({ ref: 'Genesis 1:2', bookmarked: true }));
+  assert.throws(() => study.remove({ id: study.list()[0].id }));
+  assert.deepStrictEqual(study.list().map((i) => [i.ref, i.note]), [['Genesis 1:1', 'kept']]);
+  fs.rmdirSync(`${file}.tmp`);
+  assert.strictEqual(study.savePassage({ ref: 'Genesis 1:1', note: 'now it saves' }).note, 'now it saves');
+});
+
+test('one damaged entry does not sink the export', () => {
+  const { file, now } = notebook();
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    items: [{ id: 'a', kind: 'answer', question: 'Hand-edited?', answer: 'Yes.' }],
+  }));
+  const out = new Study(file, { now }).exportMarkdown();
+  assert.ok(out.markdown.includes('### Hand-edited?'));
+  assert.ok(out.markdown.includes('_AI-written, check it against the sources._'));
+});

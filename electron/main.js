@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, shell, Menu, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu, safeStorage, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -110,6 +110,22 @@ app.whenReady().then(() => {
 
   ipcMain.handle('open-external', (_event, url) => {
     if (/^https?:\/\//i.test(String(url))) shell.openExternal(String(url));
+  });
+
+  // The page can only offer text and a suggested name; where it goes is
+  // whatever the person chooses in the dialog, and nothing is written if they
+  // cancel.
+  ipcMain.handle('save-file', async (_event, file) => {
+    const content = file && typeof file.content === 'string' ? file.content : null;
+    if (content === null || content.length > 20 * 1024 * 1024) return { saved: false };
+    const name = path.basename(String((file && file.name) || '')).replace(/[^\w.\- ]/g, '_') || 'notebook.md';
+    const choice = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: path.join(app.getPath('documents'), name),
+      filters: [{ name: 'Markdown', extensions: ['md'] }, { name: 'All files', extensions: ['*'] }],
+    });
+    if (choice.canceled || !choice.filePath) return { saved: false };
+    await fs.promises.writeFile(choice.filePath, content, 'utf8');
+    return { saved: true, path: choice.filePath };
   });
 
   Menu.setApplicationMenu(Menu.buildFromTemplate([

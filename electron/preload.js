@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('sefariaLens', {
     return res.data;
   },
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  // Write text the page produced (a notebook export) to a file the person
+  // picks in a Save dialog. Resolves { saved, path }.
+  saveFile: (file) => ipcRenderer.invoke('save-file', file),
   // Progress from a running generation: token deltas, phase changes, timings.
   // The renderer routes them by request id, so an abandoned answer can never
   // paint over a newer one.

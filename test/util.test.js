@@ -81,6 +81,21 @@ test('parses Sefaria search ids', () => {
     parseSearchId('Genesis 1:1 (The Holy Scriptures: A New Translation (JPS 1917) [en])'),
     { ref: 'Genesis 1:1', versionTitle: 'The Holy Scriptures: A New Translation (JPS 1917)', lang: 'en' },
   );
+  // A ref with its own parentheses must not be cut at the first one: these
+  // are real ids, and every Lieberman hit used to collapse into one wrong ref.
+  assert.deepStrictEqual(
+    parseSearchId('Tosefta Bikkurim (Lieberman) 2:16 (Sefaria Community Translation [en])'),
+    { ref: 'Tosefta Bikkurim (Lieberman) 2:16', versionTitle: 'Sefaria Community Translation', lang: 'en' },
+  );
+  assert.deepStrictEqual(
+    parseSearchId('Ein Yaakov (Glick Edition), Berakhot 5:15 (The Holy Scriptures: A New Translation (JPS 1917) [en])'),
+    { ref: 'Ein Yaakov (Glick Edition), Berakhot 5:15', versionTitle: 'The Holy Scriptures: A New Translation (JPS 1917)', lang: 'en' },
+  );
+  assert.deepStrictEqual(
+    parseSearchId('Genesis 1:1 (Tanakh [with Onkelos translation] [en])'),
+    { ref: 'Genesis 1:1', versionTitle: 'Tanakh [with Onkelos translation]', lang: 'en' },
+  );
+  assert.strictEqual(parseSearchId('Tosefta Bikkurim (Lieberman) 2:16').ref, 'Tosefta Bikkurim (Lieberman) 2:16');
   assert.deepStrictEqual(
     parseSearchId('Berakhot 2a (Talmud Bavli. German trans. [de])'),
     { ref: 'Berakhot 2a', versionTitle: 'Talmud Bavli. German trans.', lang: 'de' },

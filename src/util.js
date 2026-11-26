@@ -126,12 +126,23 @@ function isHebrew(s) {
  */
 function parseSearchId(id) {
   if (!id) return null;
-  // The version title can itself contain parentheses — "The Holy Scriptures:
-  // A New Translation (JPS 1917)" — so the suffix is matched from the end, and
-  // the tag is any language, not only Hebrew or English.
-  const m = String(id).match(/^(.*?)\s*\((.+)\[([a-z]{2,3})\]\s*\)\s*$/);
-  if (m) {
-    return { ref: m[1].trim(), versionTitle: m[2].trim(), lang: m[3] };
+  // Both halves can contain parentheses — the ref ("Tosefta Bikkurim
+  // (Lieberman) 2:16") and the version title ("The Holy Scriptures: A New
+  // Translation (JPS 1917)") — so neither a first nor a last "(" can be
+  // trusted. The suffix is the group that closes at the very end: walk back
+  // from that ")" to the "(" that balances it. The tag is any language.
+  const text = String(id);
+  const tag = text.match(/\[([a-z]{2,3})\]\s*\)\s*$/);
+  if (tag) {
+    let depth = 0;
+    for (let i = text.lastIndexOf(')'); i >= 0; i--) {
+      if (text[i] === ')') depth += 1;
+      else if (text[i] === '(') depth -= 1;
+      if (depth === 0) {
+        if (i === 0) break;
+        return { ref: text.slice(0, i).trim(), versionTitle: text.slice(i + 1, tag.index).trim(), lang: tag[1] };
+      }
+    }
   }
   return { ref: String(id).trim(), versionTitle: '', lang: isHebrew(id) ? 'he' : 'en' };
 }

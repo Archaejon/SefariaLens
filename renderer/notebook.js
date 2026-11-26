@@ -62,9 +62,9 @@ function studyToolsHtml(index) {
       aria-label="${noted ? 'Edit your note on' : 'Write a note on'} ${esc(ref)}">✎</button>`;
 }
 
-function noteEditorHtml(saveAttr, value, hasNote) {
+function noteEditorHtml(saveAttr, value, hasNote, owner) {
   return `<div class="note-editor">
-      <textarea data-note-input rows="3" maxlength="10000" aria-label="Your note"
+      <textarea data-note-input data-note-for="${esc(owner)}" rows="3" maxlength="10000" aria-label="Your note"
         placeholder="Your note. Ctrl+Enter saves, Esc cancels.">${esc(value)}</textarea>
       <div class="note-actions">
         <button class="primary small" ${saveAttr}>Save note</button>
@@ -78,16 +78,43 @@ function segNoteHtml(index) {
   const ref = segStudyRef(S.reader, index);
   const item = S.studyByRef.get(ref);
   const note = item ? item.note : '';
-  if (S.noteOpen === ref) return noteEditorHtml(`data-note-save="${index}"`, S.noteDraft, Boolean(note));
+  if (S.noteOpen === ref) return noteEditorHtml(`data-note-save="${index}"`, S.noteDraft, Boolean(note), ref);
   return note
     ? `<button class="seg-note" data-note="${index}" title="Edit this note">${esc(note)}</button>`
     : '';
 }
 
-/** Keep what is being typed when the body is redrawn for another reason. */
+/**
+ * Keep what is being typed when the body is redrawn for another reason. Only
+ * the editor that is still the open one counts: when the editor moves to a
+ * different verse, the old textarea is still on the page for one more render
+ * and must not hand its text to the new one.
+ */
 function keepNoteDraft() {
   const input = document.querySelector('#reader-text [data-note-input]');
-  if (input) S.noteDraft = input.value;
+  if (input && input.dataset.noteFor === S.noteOpen) S.noteDraft = input.value;
+}
+
+/**
+ * An editor left open with changes when another verse's note is opened: save
+ * it instead of dropping what was typed.
+ */
+async function settleOpenNote() {
+  const data = S.reader;
+  const ref = S.noteOpen;
+  if (!data || !ref) return;
+  keepNoteDraft();
+  const current = S.studyByRef.get(ref);
+  const draft = S.noteDraft;
+  if (draft.trim() === String((current && current.note) || '').trim()) return;
+  const index = (data.rows || []).findIndex((_, i) => segStudyRef(data, i) === ref);
+  if (index < 0) return;
+  try {
+    await savePassage({ ...passagePayload(index), note: draft });
+    toast(`Note on ${ref} saved`);
+  } catch (err) {
+    toast(err.message, 'err');
+  }
 }
 
 function focusNoteInput(root) {
@@ -123,9 +150,14 @@ async function toggleBookmark(index) {
   renderReaderBody();
 }
 
-function openNote(index) {
+async function openNote(index) {
   if (!S.reader) return;
-  const ref = segStudyRef(S.reader, index);
+  const data = S.reader;
+  const ref = segStudyRef(data, index);
+  if (S.noteOpen === ref) { focusNoteInput($('#reader-text')); return; }
+  await settleOpenNote();
+  // The passage may have changed while the other note was being saved.
+  if (S.reader !== data) return;
   const item = S.studyByRef.get(ref);
   S.noteOpen = ref;
   S.noteDraft = item ? item.note : '';
@@ -207,7 +239,8 @@ async function saveAnswer() {
   } catch (err) {
     toast(err.message, 'err');
   }
-  renderAnswer(result);
+  // A new question may have started meanwhile; its page is not ours to redraw.
+  if (S.askResult === result) renderAnswer(result);
 }
 
 async function toggleSourceBookmark(index) {
@@ -217,12 +250,16 @@ async function toggleSourceBookmark(index) {
   const current = S.studyByRef.get(src.ref);
   const next = !(current && current.bookmarked);
   try {
-    await savePassage({ ref: src.ref, open: src.ref, he: src.he || '', en: src.en || '', bookmarked: next });
+    // An entry made in the reader already knows its chapter and full text;
+    // a source card only has an excerpt, so it fills those in for new entries.
+    await savePassage(current
+      ? { ref: src.ref, bookmarked: next }
+      : { ref: src.ref, open: src.ref, he: src.he || '', en: src.en || '', bookmarked: next });
     toast(next ? `Bookmarked ${src.ref}` : `Bookmark removed from ${src.ref}`);
   } catch (err) {
     toast(err.message, 'err');
   }
-  renderAnswer(result);
+  if (S.askResult === result) renderAnswer(result);
 }
 
 /* ------------------------------------------------------------------ view */
@@ -252,7 +289,7 @@ function nbDate(at) {
 }
 
 function nbNoteHtml(item) {
-  if (S.nbEdit === item.id) return noteEditorHtml(`data-nb-save="${esc(item.id)}"`, S.noteDraft, Boolean(item.note));
+  if (S.nbEdit === item.id) return noteEditorHtml(`data-nb-save="${esc(item.id)}"`, S.noteDraft, Boolean(item.note), item.id);
   return item.note ? `<p class="nb-note">${esc(item.note)}</p>` : '';
 }
 
@@ -307,13 +344,18 @@ function renderNotebook() {
   const host = $('#nb-list');
   const meta = $('#nb-meta');
   if (!host || !meta) return;
+  // Filtering or switching tabs redraws the list; a note being typed survives it.
+  const typing = host.querySelector('[data-note-input]');
+  if (typing && typing.dataset.noteFor === S.nbEdit) S.noteDraft = typing.value;
   const tabs = $('#nb-filter');
   if (tabs) {
     tabs.innerHTML = NB_FILTERS.map(([id, label]) =>
       `<button data-nb-filter="${id}" class="${S.nbFilter === id ? 'is-active' : ''}">${label}</button>`).join('');
   }
-  const exportBtn = $('#nb-export');
-  if (exportBtn) exportBtn.disabled = !S.study.length;
+  for (const id of ['#nb-export', '#nb-save']) {
+    const button = $(id);
+    if (button) button.disabled = !S.study.length;
+  }
 
   if (!S.study.length) {
     meta.textContent = '';
@@ -325,7 +367,8 @@ function renderNotebook() {
     return;
   }
 
-  const shown = S.study.filter(notebookMatches);
+  // The entry being edited stays listed even if the filter no longer matches it.
+  const shown = S.study.filter((item) => item.id === S.nbEdit || notebookMatches(item));
   const passages = S.study.filter((i) => i.kind === 'passage').length;
   const answers = S.study.length - passages;
   meta.textContent = `${passages} passage${passages === 1 ? '' : 's'} · ${answers} answer${answers === 1 ? '' : 's'}`
@@ -344,11 +387,12 @@ async function saveNotebookNote(id, { clear = false } = {}) {
     const { item } = await api.rpc('study.setNote', { id, note });
     applyStudyChange(item ? { item } : { removedId: id });
     toast(note.trim() ? 'Note saved' : (item ? 'Note deleted' : 'Note deleted; the entry had nothing else to keep'));
+    S.nbEdit = '';
+    S.noteDraft = '';
   } catch (err) {
+    // Leave the editor open with what was typed.
     toast(err.message, 'err');
   }
-  S.nbEdit = '';
-  S.noteDraft = '';
   renderNotebook();
 }
 
@@ -371,6 +415,32 @@ async function exportNotebook() {
     toast(`Notebook copied as Markdown: ${out.passages} passage${out.passages === 1 ? '' : 's'}, ${out.answers} answer${out.answers === 1 ? '' : 's'}`);
   } catch (err) {
     toast(`Could not copy the notebook: ${err.message}`, 'err');
+  }
+}
+
+/**
+ * Save the notebook as a Markdown file: through the desktop app's Save dialog,
+ * or as an ordinary download when the page runs in the browser harness.
+ */
+async function saveNotebookFile() {
+  try {
+    const out = await api.rpc('study.export');
+    const name = `sefaria-lens-notebook-${new Date().toISOString().slice(0, 10)}.md`;
+    if (typeof api.saveFile === 'function') {
+      const res = await api.saveFile({ name, content: out.markdown });
+      if (res && res.saved) toast(`Notebook saved to ${res.path}`);
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([out.markdown], { type: 'text/markdown;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (err) {
+    toast(`Could not save the notebook: ${err.message}`, 'err');
   }
 }
 
@@ -430,7 +500,8 @@ document.addEventListener('click', (e) => {
     if (item) { setView('ask'); runAsk(item.question); }
     return;
   }
-  if (hit('#nb-export')) exportNotebook();
+  if (hit('#nb-export')) { exportNotebook(); return; }
+  if (hit('#nb-save')) saveNotebookFile();
 });
 
 document.addEventListener('keydown', (e) => {

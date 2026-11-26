@@ -126,3 +126,23 @@ test('the dev harness answers its own page and refuses everyone else', async () 
     assert.strictEqual(calls.length, 2);
   });
 });
+
+test('saving the settings form unchanged does not persist an environment override', () => {
+  const file = path.join(tmp('settings'), 'settings.json');
+  fs.writeFileSync(file, JSON.stringify({ provider: 'openai', model: 'file-model', baseUrl: '' }));
+  const env = { SEFARIA_LENS_PROVIDER: 'ollama', SEFARIA_LENS_MODEL: 'env-model' };
+  const settings = new Settings(file, { env });
+  // The form sends every field it shows, including the ones it did not change.
+  settings.set({ provider: 'ollama', model: 'env-model', baseUrl: '', fontSize: 22 });
+  let saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.strictEqual(saved.provider, 'openai');
+  assert.strictEqual(saved.model, 'file-model');
+  assert.strictEqual(saved.fontSize, 22);
+  assert.strictEqual(settings.get().model, 'env-model');
+
+  // Changing a field in the form is a choice, and is kept.
+  settings.set({ provider: 'ollama', model: 'picked', baseUrl: '' });
+  saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.strictEqual(saved.model, 'picked');
+  assert.strictEqual(saved.provider, 'openai');
+});

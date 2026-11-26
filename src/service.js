@@ -21,9 +21,27 @@ const { stripHtml } = require('./util.js');
  * Returns null for structures where that mapping does not exist (a Talmud daf
  * comes back as its lines, which have no verse refs of their own).
  */
-function segmentRefsFor(ref, count) {
+function segmentRefsFor(ref, count, depth) {
   const clean = String(ref || '').trim();
   if (!clean || count < 1) return null;
+  // When the work's depth is known, the segments are only "verses of this
+  // chapter" if the ref stops one level above the bottom. "Rashi on Genesis
+  // 1:1" looks like chapter:verse but is three levels deep: its segments are
+  // comments 1:1:1, 1:1:2, …, not verses 1:1, 1:2.
+  if (depth > 0) {
+    const address = clean.match(/\s(\d+(?::\d+)*)(-\d+)?$/);
+    if (!address) return null;
+    const given = address[1].split(':').length;
+    if (address[2]) {
+      if (given !== depth) return null;
+    } else if (given === depth - 1) {
+      return Array.from({ length: count }, (_, i) => `${clean}:${i + 1}`);
+    } else if (given === depth) {
+      return count === 1 ? [clean] : null;
+    } else {
+      return null;
+    }
+  }
   const range = clean.match(/^(.*?)\s+(\d+):(\d+)(?:-(\d+))?$/);
   if (range) {
     const [, book, chapter, start] = range;
@@ -204,7 +222,7 @@ function createService({
       categories: text.categories,
       primaryCategory: text.primaryCategory,
       divineName: divine,
-      segRefs: segmentRefsFor(text.ref, segments),
+      segRefs: segmentRefsFor(text.ref, segments, (text.sectionNames || []).length),
       sectionNames: text.sectionNames,
       next: text.next,
       prev: text.prev,

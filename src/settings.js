@@ -89,8 +89,11 @@ class Settings {
     const next = { ...this.data };
     for (const [k, v] of Object.entries(patch || {})) {
       if (!(k in DEFAULTS)) continue;
+      // A value the user changes replaces the override for good. The Settings
+      // form sends every field on Save, so one that still equals the override
+      // is not a choice and stays out of the file.
+      if (k in this.shadowed && v === this.data[k]) continue;
       next[k] = v;
-      // A value the user sets replaces the override for good.
       delete this.shadowed[k];
     }
     if (patch && Object.prototype.hasOwnProperty.call(patch, 'apiKey') && patch.apiKey === '') {

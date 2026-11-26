@@ -223,3 +223,19 @@ test('without a provider the reader still opens, and offers no translation', asy
     (err) => err.code === 'NO_API_KEY',
   );
 });
+
+test('segment refs follow the depth of the work, not the look of the ref', () => {
+  // Two levels: a chapter's segments are its verses.
+  assert.deepStrictEqual(segmentRefsFor('Genesis 1', 2, 2), ['Genesis 1:1', 'Genesis 1:2']);
+  assert.deepStrictEqual(segmentRefsFor('Genesis 1:3-4', 2, 2), ['Genesis 1:3', 'Genesis 1:4']);
+  assert.deepStrictEqual(segmentRefsFor('Genesis 1:3', 1, 2), ['Genesis 1:3']);
+  // Three levels: "1:1" is a verse whose segments are comments, so the second
+  // comment is 1:1:2 — not verse 1:2, where a note would land on other text.
+  assert.deepStrictEqual(
+    segmentRefsFor('Rashi on Genesis 1:1', 3, 3),
+    ['Rashi on Genesis 1:1:1', 'Rashi on Genesis 1:1:2', 'Rashi on Genesis 1:1:3'],
+  );
+  // A whole chapter of a three-level work has no flat mapping.
+  assert.strictEqual(segmentRefsFor('Rashi on Genesis 1', 40, 3), null);
+  assert.strictEqual(segmentRefsFor('Berakhot 2a', 10, 2), null);
+});

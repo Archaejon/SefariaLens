@@ -36,15 +36,22 @@ class Study {
     this.file = file;
     this.now = now;
     this.items = [];
+    // Set while the file exists but could not be read. Nothing is written in
+    // that state: a save would replace a notebook we never saw.
+    this.unreadable = null;
     this.load();
   }
 
   load() {
+    this.unreadable = null;
     let raw;
     try {
       raw = fs.readFileSync(this.file, 'utf8');
-    } catch {
-      return; // first run
+    } catch (err) {
+      // Only a missing file is a first run. A locked or forbidden one (a sync
+      // client, antivirus) still holds someone's notes.
+      if (!err || err.code !== 'ENOENT') this.unreadable = err;
+      return;
     }
     try {
       const data = JSON.parse(raw);
@@ -55,8 +62,13 @@ class Study {
       // Notes are irreplaceable. Keep the unreadable file beside the new one
       // instead of letting the next save write an empty notebook over it.
       const aside = this.file.replace(/\.json$/, '') + `.unreadable-${this.now()}.json`;
-      try { fs.renameSync(this.file, aside); } catch { /* leave it where it is */ }
       this.items = [];
+      try {
+        fs.renameSync(this.file, aside);
+      } catch (err) {
+        // Could not move it out of the way, so it must not be written over.
+        this.unreadable = err;
+      }
     }
   }
 
@@ -70,8 +82,35 @@ class Study {
     fs.renameSync(tmp, this.file);
   }
 
+  /** A file that was locked a moment ago may be readable now; try once more. */
+  ready() {
+    if (this.unreadable) this.load();
+    if (this.unreadable) {
+      throw studyError(
+        `The notebook file could not be read (${this.unreadable.code || this.unreadable.message}), so nothing was changed. Close anything that may be holding ${path.basename(this.file)} and try again.`,
+        'UNREADABLE',
+      );
+    }
+  }
+
+  /**
+   * Apply a change and write it. If the write fails the change is undone, so
+   * what the app shows never runs ahead of what is on disk.
+   */
+  change(fn) {
+    this.ready();
+    const before = this.items.map((item) => ({ ...item }));
+    try {
+      return fn();
+    } catch (err) {
+      this.items = before;
+      throw err;
+    }
+  }
+
   /** Everything, most recently touched first. */
   list() {
+    if (this.unreadable) this.load();
     return [...this.items].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   }
 
@@ -86,7 +125,11 @@ class Study {
    * and `note` are set only when given, and an entry with neither is removed.
    * Returns the entry, or null when it no longer exists.
    */
-  savePassage({ ref, open, he, en, bookmarked, note } = {}) {
+  savePassage(params = {}) {
+    return this.change(() => this.applyPassage(params));
+  }
+
+  applyPassage({ ref, open, he, en, bookmarked, note } = {}) {
     const key = line(ref, 300);
     if (!key) throw studyError('A passage needs a reference.', 'BAD_REQUEST');
     const at = this.now();
@@ -122,7 +165,11 @@ class Study {
   }
 
   /** Keep an answer from Ask. Saving the same answer twice returns the first. */
-  saveAnswer({ question, answer, caveats, confidence, sources, model } = {}) {
+  saveAnswer(params = {}) {
+    return this.change(() => this.applyAnswer(params));
+  }
+
+  applyAnswer({ question, answer, caveats, confidence, sources, model } = {}) {
     const q = line(question, 600);
     const a = text(answer, MAX_ANSWER);
     if (!q || !a) throw studyError('An answer needs its question and its text.', 'BAD_REQUEST');
@@ -156,25 +203,30 @@ class Study {
 
   /** Set the note on any entry. A passage left with no note and no bookmark goes. */
   setNote({ id, note } = {}) {
-    const item = this.items.find((i) => i.id === id);
-    if (!item) throw studyError('That notebook entry no longer exists.', 'NOT_FOUND');
-    if (item.kind === 'passage') return this.savePassage({ ref: item.ref, note });
-    item.note = text(note, MAX_NOTE);
-    item.updatedAt = this.now();
-    this.save();
-    return { ...item };
+    return this.change(() => {
+      const item = this.items.find((i) => i.id === id);
+      if (!item) throw studyError('That notebook entry no longer exists.', 'NOT_FOUND');
+      if (item.kind === 'passage') return this.applyPassage({ ref: item.ref, note });
+      item.note = text(note, MAX_NOTE);
+      item.updatedAt = this.now();
+      this.save();
+      return { ...item };
+    });
   }
 
   remove({ id } = {}) {
-    const before = this.items.length;
-    this.items = this.items.filter((i) => i.id !== id);
-    const removed = this.items.length < before;
-    if (removed) this.save();
-    return { removed };
+    return this.change(() => {
+      const before = this.items.length;
+      this.items = this.items.filter((i) => i.id !== id);
+      const removed = this.items.length < before;
+      if (removed) this.save();
+      return { removed };
+    });
   }
 
   /** The whole notebook as Markdown, for pasting into anything else. */
   exportMarkdown() {
+    this.ready();
     const items = this.list();
     const passages = items.filter((i) => i.kind === 'passage');
     const answers = items.filter((i) => i.kind === 'answer');
@@ -202,9 +254,11 @@ class Study {
           out.push('');
         }
         if (a.note) out.push(a.note, '');
-        const facts = [new Date(a.createdAt).toISOString().slice(0, 10)];
+        // A hand-edited entry may have no usable date; that must not sink the export.
+        const saved = new Date(a.createdAt);
+        const facts = Number.isNaN(saved.getTime()) ? [] : [saved.toISOString().slice(0, 10)];
         if (a.model) facts.push(a.model);
-        out.push(`_Saved ${facts.join(' · ')}; AI-written, check it against the sources._`, '');
+        out.push(`_${facts.length ? `Saved ${facts.join(' · ')}; ` : ''}AI-written, check it against the sources._`, '');
       }
     }
     if (!items.length) out.push('Nothing saved yet.', '');

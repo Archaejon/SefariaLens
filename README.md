@@ -213,13 +213,13 @@ Texts that are not addressed by chapter and verse (a Talmud daf, whose segments 
 
 ## The notebook
 
-Every verse in the reader carries two small controls beside its commentary button: **☆** bookmarks it and **✎** opens a note under it (Ctrl+Enter saves, Esc cancels). A saved note stays under the verse whenever that passage is open; clicking it edits it. A verse has one entry however it was reached, so a bookmark made in Genesis 1 is the same one seen at Genesis 1:3. A line of a Talmud daf has no verse ref of its own and is saved as a numbered segment of the daf (`Berakhot 2a:2`).
+Every verse in the reader carries two small controls beside its commentary button: **☆** bookmarks it and **✎** opens a note under it (Ctrl+Enter saves, Esc cancels). A saved note stays under the verse whenever that passage is open; clicking it edits it. A verse has one entry however it was reached, so a bookmark made in Genesis 1 is the same one seen at Genesis 1:3. A line of a Talmud daf has no verse ref of its own and is saved as a numbered segment of the daf (`Berakhot 2a:2`); a comment in a commentary is saved under its own ref (`Rashi on Genesis 1:1:2`), not the verse it sits on. Opening a note on another verse while one is still being written saves the first one.
 
 In **Ask**, an answer written by a model has **Save to notebook**, which keeps the question, the answer, its caveats and each source with the reason it was chosen; every source card has its own **☆ Bookmark**. An unranked fallback list is not an answer and offers only the per-source bookmarks.
 
-**Notebook** in the sidebar lists it all, most recently changed first, with filters for bookmarks, notes and answers and a text filter over references, text and notes. Opening a passage returns to the chapter it was saved from with the verse brought into view. **Copy as Markdown** puts the whole notebook on the clipboard. Removing an entry asks once, because a note cannot be recovered.
+**Notebook** in the sidebar lists it all, most recently changed first, with filters for bookmarks, notes and answers and a text filter over references, text and notes. Opening a passage returns to the chapter it was saved from with the verse brought into view. **Copy as Markdown** puts the whole notebook on the clipboard and **Save as file…** writes it wherever you choose. Removing an entry asks once, because a note cannot be recovered.
 
-The notebook is one file, `notebook.json`, in the app's data folder. It is not a cache: nothing in it expires, it is written to a temporary file and renamed so a crash cannot leave half a notebook, and a file that cannot be read is set aside as `notebook.unreadable-<time>.json` instead of being overwritten.
+The notebook is one file, `notebook.json`, in the app's data folder. It is not a cache: nothing in it expires, it is written to a temporary file and renamed so a crash cannot leave half a notebook, a file that cannot be parsed is set aside as `notebook.unreadable-<time>.json` instead of being overwritten, and one that exists but cannot be opened (locked by a sync client, say) blocks saving with a message until it can.
 
 ## Transliteration
 
@@ -329,6 +329,7 @@ Sefaria serves plain text with inline HTML, and some of it used to reach the pag
 ```
 electron/main.js     Electron window, IPC, encrypted key storage
 electron/preload.js  contextBridge → window.sefariaLens.rpc
+electron/smoke.js    headless check of the real app (SEFARIA_LENS_SMOKE=1), run by CI on the packaged build
 src/service.js       one RPC service used by Electron and the dev harness
 src/sefaria.js       Sefaria client: texts, search, lexicon, links, TOC, shapes
 src/chapters.js      shape → section and chapter refs for the library and reader
@@ -373,10 +374,12 @@ Nothing needs enabling: the workflow runs as soon as it is on `main`, and the re
 | Trigger | Jobs | What it proves |
 | --- | --- | --- |
 | push to `main`, pull request | `test` | `npm ci` resolves the lockfile, ESLint is clean, every tracked `.js` file parses, and all `node:test` suites pass on Node 22 |
-| tag `v<version>` | `test`, `build-portable` | the tag matches `package.json`, the portable exe packages on a Windows runner, and the exe plus `SHA256SUMS.txt` reach the GitHub release, with the tag annotation as its notes |
+| tag `v<version>` | `test`, `build-portable` | the tag matches `package.json`, the portable exe packages on a Windows runner, the packaged app passes its own smoke test, and the exe plus `SHA256SUMS.txt` reach the GitHub release, with the tag annotation as its notes |
 | manual run (**Actions → CI → Run workflow**) | `test`, `build-portable` | the same build, kept for seven days as a workflow artifact instead of being released |
 
-`git tag -a v1.0.11 -F notes.md && git push github v1.0.11` is the whole release on GitHub. Re-running a tag build replaces the assets of an existing release. `npm run release` still pushes to `origin` and watches Woodpecker; use `--no-push` and push the tag to GitHub by hand until it learns about Actions.
+`git tag -a v1.0.11 -F notes.md && git push github v1.0.11` is the whole release on GitHub. Re-running a tag build replaces the assets of an existing release.
+
+Before anything is published the Windows job launches the app it just built with `SEFARIA_LENS_SMOKE=1` ([electron/smoke.js](electron/smoke.js)): headless, on a throwaway profile, it opens passages, switches a translation, picks a commentary, walks the library breadcrumb and writes, lists and removes a notebook entry, then exits 0 or 1 and prints what it saw. It reads the live Sefaria API, so a failure gets one retry before the build is failed. `npm run release` still pushes to `origin` and watches Woodpecker; use `--no-push` and push the tag to GitHub by hand until it learns about Actions.
 
 ### Woodpecker on Codeberg
 
