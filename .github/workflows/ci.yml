@@ -75,6 +75,28 @@ jobs:
       - run: npm ci
       - run: npm run dist
 
+      # Launch what was just built, before anything is published. The app runs
+      # headless, drives its own reader, commentaries, library and notebook,
+      # and exits non-zero if any of it is broken. It reads the live Sefaria
+      # API, so one failure gets a second attempt before the build is failed.
+      - name: Smoke-test the packaged app
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $exe = Join-Path $PWD 'dist/win-unpacked/Sefaria Lens.exe'
+          $env:SEFARIA_LENS_SMOKE = '1'
+          $env:SEFARIA_LENS_SMOKE_OUT = Join-Path $env:RUNNER_TEMP 'smoke.json'
+          $ok = $false
+          foreach ($attempt in 1..2) {
+            $env:SEFARIA_LENS_USER_DATA = Join-Path $env:RUNNER_TEMP "smoke-profile-$attempt"
+            Remove-Item $env:SEFARIA_LENS_SMOKE_OUT -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -PassThru -Wait
+            Write-Host "attempt $attempt exited with code $($p.ExitCode)"
+            if (Test-Path $env:SEFARIA_LENS_SMOKE_OUT) { Get-Content $env:SEFARIA_LENS_SMOKE_OUT }
+            if ($p.ExitCode -eq 0) { $ok = $true; break }
+          }
+          if (-not $ok) { exit 1 }
+
       - name: Checksums
         run: |
           cd dist
