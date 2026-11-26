@@ -14,6 +14,7 @@ npm install
 npm start          # Electron window
 npm run dev        # browser harness at http://127.0.0.1:4173
 npm test           # node:test suites
+npm run lint       # ESLint: unused names, undefined names, real mistakes
 ```
 
 `npm run dev` is usually the faster loop — it serves the same UI and the same
@@ -51,8 +52,8 @@ Two invariants are easy to break and worth watching in review:
 ## Pull requests
 
 Keep a change to one concern, keep `npm test` green, and say what you measured
-if the change is about speed or resource use. There is no linter to satisfy beyond CI's
-syntax check; a reviewer will read the diff.
+if the change is about speed or resource use. `npm run lint` (ESLint,
+correctness rules only, no formatting) runs in CI and should be clean.
 
 ## Continuous integration
 

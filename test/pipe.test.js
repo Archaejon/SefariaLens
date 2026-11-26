@@ -128,3 +128,35 @@ test('a closed pipe falls back to LOCAL_DOWN advice', async () => {
     (err) => err.code === 'LOCAL_DOWN' && /Nothing is listening/.test(err.message),
   );
 });
+
+test('a pipe that times out is reported as a timeout, not as a cancellation', async () => {
+  const llm = new LLM({
+    getSettings: () => ({ provider: 'freebuff', model: 'freebuff', timeoutMs: 30 }),
+    // The real transport rejects with CANCELLED when its signal aborts, and
+    // the client's own timer is what aborts it here.
+    pipeImpl: (pipe, payload, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(Object.assign(new Error('Cancelled.'), { code: 'CANCELLED' }));
+      }, { once: true });
+    }),
+  });
+  await assert.rejects(
+    () => llm.chat([{ role: 'user', content: 'ping' }]),
+    (err) => err.code === 'TIMEOUT' && /did not answer/.test(err.message),
+  );
+});
+
+test('pressing Stop on a pipe request is still a cancellation', async () => {
+  const ctrl = new AbortController();
+  const llm = new LLM({
+    getSettings: () => ({ provider: 'freebuff', model: 'freebuff', timeoutMs: 5000 }),
+    pipeImpl: (pipe, payload, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(Object.assign(new Error('Cancelled.'), { code: 'CANCELLED' }));
+      }, { once: true });
+    }),
+  });
+  const pending = llm.chat([{ role: 'user', content: 'ping' }], { signal: ctrl.signal });
+  setTimeout(() => ctrl.abort(), 20);
+  await assert.rejects(() => pending, (err) => err.code === 'CANCELLED');
+});

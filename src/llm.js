@@ -602,6 +602,14 @@ class LLM {
       }
       return reply.text;
     } catch (err) {
+      // Our own timer aborts the request at the same moment the pipe's would
+      // time out, and an abort reads as a cancellation. Nobody pressed Stop.
+      if (err && err.code === 'CANCELLED' && timedOut && !(opts.signal && opts.signal.aborted)) {
+        throw new LLMError(
+          `The Freebuff pipe did not answer within ${Math.round(cfg.timeoutMs / 1000)}s.`,
+          { code: 'TIMEOUT' },
+        );
+      }
       if (err && err.code === 'CANCELLED') throw cancelled();
       if (err instanceof LLMError) throw err;
       const code = err && err.code === 'PIPE_TIMEOUT' ? 'TIMEOUT'

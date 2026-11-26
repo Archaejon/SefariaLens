@@ -1,6 +1,5 @@
 'use strict';
 
-const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -13,7 +12,7 @@ const { Study } = require('./study.js');
 const { transliterate, wordInfo, STYLE_INFO } = require('./translit.js');
 const { readingFor } = require('./divine-name.js');
 const { buildChapters } = require('./chapters.js');
-const { stripHtml, clip } = require('./util.js');
+const { stripHtml } = require('./util.js');
 
 /**
  * A ref for each loaded segment, when the text is addressed by chapter and

@@ -372,7 +372,7 @@ Nothing needs enabling: the workflow runs as soon as it is on `main`, and the re
 
 | Trigger | Jobs | What it proves |
 | --- | --- | --- |
-| push to `main`, pull request | `test` | `npm ci` resolves the lockfile, every tracked `.js` file parses, and all `node:test` suites pass on Node 22 |
+| push to `main`, pull request | `test` | `npm ci` resolves the lockfile, ESLint is clean, every tracked `.js` file parses, and all `node:test` suites pass on Node 22 |
 | tag `v<version>` | `test`, `build-portable` | the tag matches `package.json`, the portable exe packages on a Windows runner, and the exe plus `SHA256SUMS.txt` reach the GitHub release, with the tag annotation as its notes |
 | manual run (**Actions → CI → Run workflow**) | `test`, `build-portable` | the same build, kept for seven days as a workflow artifact instead of being released |
 

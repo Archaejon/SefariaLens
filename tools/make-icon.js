@@ -31,7 +31,7 @@ function shade(x, y) {
   if (!inRoundedRect(x, y, SIZE, SIZE, 54)) return [0, 0, 0, 0];
 
   let color = BG;
-  let alpha = 255;
+  const alpha = 255;
 
   // gold hairline border
   const inset = 5;

@@ -63,7 +63,7 @@ function rendererFile(pathname) {
   return filePath.startsWith(RENDERER + path.sep) ? filePath : null;
 }
 
-function createDevServer({ service, port = PORT }) {
+function createDevServer({ service }) {
   // Progress from a running generation (token deltas, phases), broadcast to the
   // page the same way the desktop app sends IPC events.
   const listeners = new Set();

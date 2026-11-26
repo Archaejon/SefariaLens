@@ -35,8 +35,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # No linter is configured; this at least stops a file that does not
-      # parse from reaching main, including the renderer, which no test loads.
+      - run: npm run lint
+      # The renderer is linted without cross-file name resolution, so this
+      # still earns its place: no test loads those files either.
       - name: Syntax check
         run: |
           git ls-files '*.js' | while read -r file; do node --check "$file"; done

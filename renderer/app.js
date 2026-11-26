@@ -1551,7 +1551,7 @@ function translitRows(pick) {
   const styles = CORE_STYLES.includes(S.style) ? CORE_STYLES : [...CORE_STYLES, S.style];
   return styles.map((style) => `
     <div class="trio-row ${style === S.style ? 'is-primary' : ''}">
-      <span class="label">${STYLE_LABELS[style] || style}</span>
+      <span class="label">${esc(STYLE_LABELS[style] || style)}</span>
       <span class="value">${esc(pick(style) || '—')}</span>
     </div>`).join('');
 }
@@ -2348,7 +2348,7 @@ function bindEvents() {
       status.textContent = err.message;
     }
   });
-  $('#set-apikey').addEventListener('input', (e) => { $('#set-status').textContent = ''; });
+  $('#set-apikey').addEventListener('input', () => { $('#set-status').textContent = ''; });
 
   // first-run setup
   $('#setup-provider').addEventListener('change', setupProviderChanged);

@@ -14,7 +14,6 @@ if (process.env.SEFARIA_LENS_USER_DATA) {
   try { app.setPath('userData', process.env.SEFARIA_LENS_USER_DATA); } catch { /* keep default */ }
 }
 
-const isDev = !app.isPackaged;
 let service = null;
 let mainWindow = null;
 

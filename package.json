@@ -9,6 +9,7 @@
     "start": "electron .",
     "dev": "node tools/devserver.js",
     "test": "node --test test/*.test.js",
+    "lint": "eslint .",
     "icon": "node tools/make-icon.js",
     "dist": "electron-builder --win portable --x64 --publish never",
     "freebuff-fifo": "node tools/freebuff-fifo.js",
@@ -20,8 +21,11 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "electron": "^33.4.11",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "eslint": "^10.15.0",
+    "globals": "^17.14.0"
   },
   "build": {
     "appId": "org.sefaria.lens",

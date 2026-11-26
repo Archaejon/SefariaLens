@@ -21,7 +21,6 @@ const COMMENTARY_CATEGORIES = new Set([
 ]);
 const THOUGHT_CATEGORIES = new Set(['Jewish Thought', 'Musar', 'Chasidut', 'Kabbalah', 'Philosophy']);
 const TIER_BOOST = { primary: 1.3, commentary: 1.12, thought: 1.0, other: 1.0 };
-const TIER_QUOTA = { primary: 6, commentary: 4, thought: 2, other: 2 };
 // A hit retrieved by a Tanakh-scoped search, or the passage the planner named
 // outright. These are the verses that actually narrate or legislate the subject,
 // and they are kept ahead of a later Talmudic or halakhic discussion of it.
@@ -62,7 +61,7 @@ function tierFor(categories, title) {
 
 /** Work title from a ref: "Rashi on Genesis 1:1" -> "Rashi on Genesis". */
 function workTitleOf(ref) {
-  return String(ref || '').replace(/\s+\d+[ab]?(?::[\d\-]+)*\.?\s*$/, '').trim();
+  return String(ref || '').replace(/\s+\d+[ab]?(?::[\d-]+)*\.?\s*$/, '').trim();
 }
 
 const SYSTEM = `You are a research assistant inside Sefaria Lens, a study tool that works on the Sefaria library of Jewish texts.

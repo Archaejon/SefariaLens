@@ -505,6 +505,7 @@ function citationToLatin(inner) {
   // they are removed rather than turned into a break.
   const text = inner
     .replace(/[\u05F3\u05F4'"]/g, '')
+    // eslint-disable-next-line no-misleading-character-class -- each mark is matched on its own
     .replace(/[,\u0591-\u05AF\u05BD\u05C0\u05C3]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -628,7 +629,7 @@ function transliterateWord(word, style, opts) {
     const p = phonemes[i];
     const c = clusters[i];
     let cons = p.cons;
-    let vowel = p.vowel;
+    const vowel = p.vowel;
 
     // Doubling only reads well for single-letter consonants (sh/ch/tz stay single).
     if (p.geminate && cons && cons.length === 1) cons = cons + cons;
@@ -657,7 +658,7 @@ function transliterateWord(word, style, opts) {
   return out;
 }
 
-const WORD_BOUNDARY = /([\s\u05BE.,:;!?()\[\]{}"'\u05C3\u2013\u2014\u2018\u2019\u201C\u201D\/]+)/;
+const WORD_BOUNDARY = /([\s\u05BE.,:;!?()[\]{}"'\u05C3\u2013\u2014\u2018\u2019\u201C\u201D/]+)/;
 
 /**
  * Sefaria writes abbreviations with an ASCII quote as often as with the Hebrew

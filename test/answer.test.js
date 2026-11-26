@@ -15,7 +15,7 @@ const HITS = [
 
 function fakeSefaria(overrides = {}) {
   return {
-    search: async (q) => ({ total: 3, hits: HITS }),
+    search: async () => ({ total: 3, hits: HITS }),
     text: async (ref) => ({
       ref,
       heRef: ref,
@@ -32,13 +32,11 @@ function fakeSefaria(overrides = {}) {
 }
 
 function fakeLLM(rank, { failRank = false } = {}) {
-  let n = 0;
   return {
     config: () => ({ model: 'mock' }),
     json: async (messages) => {
       const text = messages.map((m) => m.content).join('\n');
       if (text.includes('"queries"')) return { queries: ['love your neighbor'], concepts: [] };
-      n += 1;
       if (failRank) throw new Error('provider down');
       return rank;
     },
